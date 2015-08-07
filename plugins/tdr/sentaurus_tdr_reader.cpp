@@ -53,5 +53,18 @@ namespace viennamesh
 
     return result;
   }
+  
+  hsize_t get_dataset_size(const DataSet& dataset)
+  {
+    const DataSpace &dataspace = dataset.getSpace();
+    int ndims = dataspace.getSimpleExtentNdims();
+    
+    if(ndims != 1)
+      mythrow("Dataset " << dataset.getObjName() << " has " << ndims << " dimensions");
+    
+    hsize_t size;
+    dataspace.getSimpleExtentDims(&size);
+    return size;
+  }
 
 }
