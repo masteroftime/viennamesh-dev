@@ -131,13 +131,6 @@ namespace viennamesh
       return false;
     }
 
-    mesh_handle output_mesh = make_data<mesh_handle>();
-    
-    tdr_geometry<mesh_handle::CPPResultType> geometry(output_mesh());
-    geometry.read_collection(file->openGroup("collection"));
-
-    geometry.correct_vertices();
-
     bool extrude_contacts = true;
     if ( get_input<bool>("extrude_contacts").valid() )
       extrude_contacts = get_input<bool>("extrude_contacts")();
@@ -146,7 +139,15 @@ namespace viennamesh
     if ( get_input<double>("extrude_contacts_scale").valid() )
       extrude_contacts_scale = get_input<double>("extrude_contacts_scale")();
 
-    geometry.to_viennagrid( extrude_contacts, extrude_contacts_scale );
+    
+    mesh_handle output_mesh = make_data<mesh_handle>();
+    
+    tdr_geometry<mesh_handle::CPPResultType> geometry(output_mesh());
+    
+    geometry.extrude_contacts = extrude_contacts;
+    geometry.extrude_contacts_scale = extrude_contacts_scale;
+    
+    geometry.read_collection(file->openGroup("collection"));
 
     if ( get_input<bool>("fill_triangle_contacts").valid() && get_input<bool>("fill_triangle_contacts")() )
       fill_triangle_contacts( output_mesh() );
@@ -160,10 +161,11 @@ namespace viennamesh
     if (!quantity_fields.empty())
     {
       quantity_field_handle output_quantity_fields = make_data<viennagrid::quantity_field>();
-      output_quantity_fields.resize( quantity_fields.size() );
+      output_quantity_fields.set(quantity_fields);
+      /*output_quantity_fields.resize( quantity_fields.size() );
 
       for (std::size_t i = 0; i != quantity_fields.size(); ++i)
-        output_quantity_fields.set(i, quantity_fields[i]);
+        output_quantity_fields.set(i, quantity_fields[i]);*/
 
       set_output( "quantities", output_quantity_fields );
     }

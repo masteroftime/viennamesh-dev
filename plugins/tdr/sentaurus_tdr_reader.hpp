@@ -23,7 +23,6 @@
 #include <typeinfo>
 #include <cstdlib>
 #include <boost/scoped_array.hpp>
-#include <boost/algorithm/string/erase.hpp>
 
 using std::string;
 
@@ -36,7 +35,6 @@ using namespace H5;
 #define FALSE   0
 
 #define mythrow(a) { std::cerr << a << std::endl; throw; }
-#define mythrow1(a) { std::cerr << a << std::endl; throw; }
 
 
 #include "viennagridpp/mesh/element_creation.hpp"
@@ -62,14 +60,6 @@ namespace viennamesh
   string read_string(const H5Object &g, const string name);
   hsize_t get_dataset_size(const DataSet& dataset);
 
-  struct dataset_t
-  {
-    string name, quantity, unit;
-    unsigned int nvalues;
-    double conversion_factor;
-    std::vector<double> values;
-  };
-
   struct element_t
   {
     viennagrid_element_type element_tag;
@@ -82,15 +72,7 @@ namespace viennamesh
     string name,material;
     int nelements,npointidx;
     std::vector<element_t> elements;
-    std::map<string,dataset_t> dataset;
   };
-
-  /*struct attributeinfo_c
-  {
-    const dataset_t *firstattribute;
-    std::map<int,double> values;
-    attributeinfo_c() : firstattribute(NULL) {}
-  };*/
 
 
   template<typename VertexT>
@@ -105,16 +87,20 @@ namespace viennamesh
   {
     typedef typename viennagrid::result_of::point<MeshT>::type PointType;
     typedef typename viennagrid::result_of::element<MeshT>::type VertexType;
+    typedef typename viennagrid::result_of::region<MeshT>::type RegionType;
     
     unsigned int nvertices;
     int dim,nregions,ndatasets;
-    //std::vector<double> vertex;
     std::map<string,region_t> region;
     double trans_matrix[9],trans_move[3];
     std::map< int, std::vector<int> > newly_created_vertices;
     
     MeshT const & mesh;
     std::vector<VertexType> vertices;
+    std::map<std::string, viennagrid::quantity_field> quantity_fields_;
+    
+    bool extrude_contacts;
+    double extrude_contacts_scale;
     
     tdr_geometry(MeshT const & mesh) : mesh(mesh) {}
 
@@ -214,10 +200,9 @@ namespace viennamesh
     void read_region(const int regnr, const Group &reg)
     {
       string name=read_string(reg,"name");
-      boost::erase_all(name, "_");
-      boost::erase_all(name, ".");
 
       string material;
+      std::stringstream ss;
       const int typ=read_int(reg,"type");
       switch (typ)
       {
@@ -229,23 +214,14 @@ namespace viennamesh
           // attribute "part 0", no idea for what
           break;
         case 2:
-          std::stringstream ss;
           ss << "Interface" << read_int(reg,"bulk 0") << read_int(reg,"bulk 1");
           material = ss.str();
           break;
         //default : mythrow(__LINE__ << ": Unknown type " << typ << " in region " << read_string(reg,"name"));
-        default :std::cerr << __LINE__ << ": Unknown type " << typ << " in region " << read_string(reg,"name") << std::endl;
+        default: std::cerr << __LINE__ << ": Unknown type " << typ << " in region " << read_string(reg,"name") << std::endl;
          std::cerr << "I do not throw, I only skip\n";
           return;
       }
-
-//       const int nparts=read_int(reg,"number of parts");
-//       if (nparts!=1)
-//       {
-//         //mythrow("Number of parts not one");
-//        std::cerr << "Number of parts not one (" << nparts << ")\n";
-//        std::cerr << "I only skip this\n";
-//       }
 
       region[name].regnr=regnr;
       region[name].name=name;
@@ -279,16 +255,25 @@ namespace viennamesh
       mythrow("Region " << regnr << " not found");
     }
 
-    void read_values(dataset_t &dataset,const DataSet &values)
+    template <typename RangeT>
+    void read_values(const DataSet &values, viennagrid::quantity_field & quantities, RangeT const & el)
     {
-      hsize_t size = get_dataset_size(values);
+      typedef typename viennagrid::result_of::iterator<RangeT>::type IteratorType;
       
-      if (dataset.nvalues != size)
-        mythrow("Dataset " << dataset.name << " should have " << dataset.nvalues << " values, but has " << size);
+      hsize_t size = get_dataset_size(values);
+      unsigned int nvalues = el.end() - el.begin();
+      
+      if (nvalues != size)
+        mythrow("Dataset " << values.getObjName() << " should have " << nvalues << " values, but has " << size);
 
       boost::scoped_array<double> v(new double[size]);
       values.read( v.get(), PredType::NATIVE_DOUBLE);
-      dataset.values.insert(dataset.values.end(),&v[0],&v[size]);
+      
+      int i = 0;
+      for(IteratorType it = el.begin(); it != el.end(); ++it)
+      {
+        quantities.set(*it, v[i++]);
+      }
     }
 
     void read_dataset(const Group &dataset)
@@ -297,19 +282,17 @@ namespace viennamesh
       if (name.find("Stress")!=name.npos)
         return;
 
-      string quantity = read_string(dataset,"quantity");
+      //string quantity = read_string(dataset,"quantity");
       int regnr = read_int(dataset,"region");
-      int nvalues=read_int(dataset,"number of values");
-      double conversion_factor = read_double(dataset,"conversion factor");
+      //int nvalues=read_int(dataset,"number of values");
+      //double conversion_factor = read_double(dataset,"conversion factor");
 
-      if (read_int(dataset,"location type")!=0)
-      {
+      if (read_int(dataset,"location type") != 0)
         mythrow("Dataset " << name << " location type not 0");
-        return;
-      }
 
       if (read_int(dataset,"structure type") != 0)
         mythrow("Dataset " << name << " structure type not 0");
+
       if (read_int(dataset,"value type") != 2)
         mythrow("Dataset " << name << " value type not 2");
 
@@ -334,14 +317,29 @@ namespace viennamesh
         unit=read_string(dataset,"unit:name");
       }
 
-      region_t &region=find_region(regnr);
+      /*region_t &region=find_region(regnr);
       region.dataset[name].name=name;
       region.dataset[name].quantity=quantity;
       region.dataset[name].nvalues=nvalues;
       region.dataset[name].conversion_factor=conversion_factor;
-      region.dataset[name].unit=unit;
+      region.dataset[name].unit=unit;*/
+      
+      region_t &reg=find_region(regnr);
+      RegionType region = mesh.get_region(reg.name);
+      
+      viennagrid::quantity_field & quantities = quantity_fields_[name];
+      
+      if(quantities.get_name() != name)
+      {
+        quantities.init(0, 1);
+        quantities.set_name(name);
+      }
+      
+      typedef typename viennagrid::result_of::const_vertex_range<RegionType>::type VertexRangeType;
 
-      read_values(region.dataset[name],dataset.openDataSet("values"));
+      VertexRangeType vertices(region);
+
+      read_values(dataset.openDataSet("values"), quantities, vertices);
     }
 
     void read_attribs0(const Group &state)
@@ -397,8 +395,11 @@ namespace viennamesh
       const DataSet &vert=geometry.openDataSet("vertex");
       read_vertex(vert);
       // What do the Units???
-
+      
+      to_viennagrid();
+      
       read_attribs0(geometry.openGroup("state_0"));
+      extrude_contacts_quantity_fields();
     }
 
     void read_collection(const Group &collection)
@@ -431,7 +432,7 @@ namespace viennamesh
       return viennagrid::cross_prod( p1-p0, p2-p0 );
     }
 
-    bool to_viennagrid(bool extrude_contacts = true, double extrude_contacts_scale = 1.0)
+    bool to_viennagrid()
     {
       viennagrid_element_type cell_type = VIENNAGRID_ELEMENT_TYPE_VERTEX;
       for (std::map<string,region_t>::iterator S=region.begin(); S!=region.end(); S++)
@@ -561,61 +562,14 @@ namespace viennamesh
       return true;
     }
 
-
-    std::vector<viennagrid::quantity_field> quantity_fields() const
+    /* sets quantity field values for vertices and elements created when extruding contacts */
+    void extrude_contacts_quantity_fields()
     {
-//       typedef typename viennagrid::result_of::element<MeshT>::type CellType;
-      typedef typename viennagrid::result_of::region<MeshT>::type RegionType;
-
-      std::map<std::string, viennagrid::quantity_field> quantity_fields;
-
-      for (std::map<string,region_t>::const_iterator R=region.begin(); R!=region.end(); R++)
-      {
-        for (std::map<string,dataset_t>::const_iterator D=R->second.dataset.begin(); D!=R->second.dataset.end(); D++)
-        {
-          string quantity_name = D->second.name;
-          viennagrid::quantity_field & quantities = quantity_fields[quantity_name];
-          quantities.init(0, 1);
-          quantities.set_name(quantity_name);
-        }
-      }
-
-
-      std::map< std::string, std::map<VertexType, int> > count;
-
-      for (std::map<string,region_t>::const_iterator R=region.begin(); R!=region.end(); R++)
-      {
-        for (std::map<string,dataset_t>::const_iterator D=R->second.dataset.begin(); D!=R->second.dataset.end(); D++)
-        {
-          if (D->second.nvalues!=D->second.values.size())
-            mythrow("Number of values for dataset " << D->second.name << " on region " << R->second.name << " not ok");
-
-          string region_name = R->second.name;
-          string quantity_name = D->second.name;
-
-          RegionType region = mesh.get_region(region_name);
-          viennagrid::quantity_field & quantities = quantity_fields[quantity_name];
-
-
-          typedef typename viennagrid::result_of::const_vertex_range<RegionType>::type ConstVertexRangeType;
-          typedef typename viennagrid::result_of::iterator<ConstVertexRangeType>::type ConstVertexIteratorType;
-
-          ConstVertexRangeType vertices(region);
-
-          std::map<typename VertexType::id_type, double> tmp;
-
-          int i = 0;
-          for (ConstVertexIteratorType vit = vertices.begin(); vit != vertices.end(); ++vit, ++i)
-          {
-            quantities.set(*vit, D->second.values[i]);
-          }
-        }
-      }
-
-      for (std::map<std::string, viennagrid::quantity_field>::iterator it = quantity_fields.begin();
-                                                                       it != quantity_fields.end();
+      for (std::map<std::string, viennagrid::quantity_field>::iterator it = quantity_fields_.begin();
+                                                                       it != quantity_fields_.end();
                                                                      ++it)
       {
+        //TODO: check quantity field type -> quantites on vertices or elements?
         viennagrid::quantity_field & quantities = it->second;
         
         for (std::map< int, std::vector<int> >::const_iterator nvit = newly_created_vertices.begin();
@@ -630,10 +584,13 @@ namespace viennamesh
           quantities.set( (*nvit).first, val );
         }
       }
+    }
 
+    std::vector<viennagrid::quantity_field> quantity_fields()
+    {
       std::vector<viennagrid::quantity_field> results;
-      for (std::map<std::string, viennagrid::quantity_field>::iterator it = quantity_fields.begin();
-                                                                       it != quantity_fields.end();
+      for (std::map<std::string, viennagrid::quantity_field>::iterator it = quantity_fields_.begin();
+                                                                       it != quantity_fields_.end();
                                                                      ++it)
       {
         results.push_back( it->second );
@@ -642,52 +599,7 @@ namespace viennamesh
       return results;
     }
 
-    void correct_vertices()
-    {
-      std::map<int,int> hakerl;
-      std::vector<double> vertexsave;
-      for (std::map<string,region_t>::iterator R=region.begin(); R!=region.end(); R++)
-      {
-        for (unsigned int j=0; j<R->second.elements.size(); j++)
-        {
-          for (unsigned int i=0; i<R->second.elements[j].vertex_indices.size(); i++)
-            hakerl[R->second.elements[j].vertex_indices[i]];
-        }
-      }
-      if (hakerl.size()==vertices.size())
-      {
-        std::cout << "correct_vertices not used" << std::endl;
-        return;
-      }
-      /*vertexsave=vertex;
-      vertex.clear();
-      for (std::map<int,int>::iterator I=hakerl.begin(); I!=hakerl.end(); I++)
-      {
-        vertex.push_back(vertexsave[I->first*dim]);
-        if (dim==2)
-          vertex.push_back(vertexsave[I->first*dim+1]);
-        if (dim==3)
-          vertex.push_back(vertexsave[I->first*dim+2]);
-        I->second=ct++;
-      }
-      for (std::map<string,region_t>::iterator R=region.begin(); R!=region.end(); R++)
-      {
-        for (unsigned int j=0; j<R->second.elements.size(); j++)
-        {
-          for (unsigned int i=0; i<R->second.elements[j].vertex_indices.size(); i++)
-          {
-            int idx=hakerl[R->second.elements[j].vertex_indices[i]];
-            R->second.elements[j].vertex_indices[i]=idx;
-          }
-        }
-      }
-      nvertices=vertex.size()/dim;*/
-      
-      std::cout << "correct_vertices used" << std::endl;
-    }
-
   };
-
 
 }
 
