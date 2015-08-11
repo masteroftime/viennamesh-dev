@@ -62,26 +62,11 @@ namespace viennamesh
 
   struct element_t
   {
-    viennagrid_element_type element_tag;
-    std::vector<int> vertex_indices;
+    viennagrid_element_type element_type;
+    std::vector<int> vertices;
   };
-
-  struct region_t
-  {
-    int regnr;
-    string name,material;
-    int nelements,npointidx;
-    std::vector<element_t> elements;
-  };
-
-
-  template<typename VertexT>
-  struct region_contacts
-  {
-    string region_name;
-    std::vector<element_t> elements;
-  };
-
+  
+  
   template<typename MeshT>
   struct tdr_geometry
   {
@@ -91,7 +76,6 @@ namespace viennamesh
     
     unsigned int nvertices;
     int dim,nregions,ndatasets;
-    std::map<string,region_t> region;
     double trans_matrix[9],trans_move[3];
     std::map< int, std::vector<int> > newly_created_vertices;
     
@@ -136,10 +120,6 @@ namespace viennamesh
       if (dim>2)
         mtype2.insertMember( "z", HOFFSET(coord2_t, z), PredType::NATIVE_DOUBLE);
 
-      /*
-      * Read two fields x and y from s2 dataset. Fields in the file
-      * are found by their names "x_name" and "y_name".
-      */
       boost::scoped_array<coord2_t> s2(new coord2_t[size]);
       vert.read( s2.get(), mtype2 );
       
@@ -157,7 +137,7 @@ namespace viennamesh
       }
     }
 
-    void read_elements(region_t &region, const DataSet &elem)
+    void read_elements(RegionType region, const DataSet &elem, bool extrude_elements)
     {
       hsize_t size = get_dataset_size(elem);
 
@@ -168,64 +148,65 @@ namespace viennamesh
       while (elct < size)
       {
         element_t element;
+        int vertex_num;
+        
         switch (el[elct++])
         {
           case 1:
-            element.element_tag = VIENNAGRID_ELEMENT_TYPE_LINE;
-            for (int i=0; i<2; i++)
-              element.vertex_indices.push_back(el[elct++]);
+            element.element_type = VIENNAGRID_ELEMENT_TYPE_LINE;
+            vertex_num = 2;
             break;
           case 2:
-            element.element_tag = VIENNAGRID_ELEMENT_TYPE_TRIANGLE;
-            for (int i=0; i<3; i++)
-              element.vertex_indices.push_back(el[elct++]);
+            element.element_type = VIENNAGRID_ELEMENT_TYPE_TRIANGLE;
+            vertex_num = 3;
             break;
           case 3:
-            element.element_tag = VIENNAGRID_ELEMENT_TYPE_QUADRILATERAL;
-            for (int i=0; i<4; i++)
-              element.vertex_indices.push_back(el[elct++]);
+            element.element_type = VIENNAGRID_ELEMENT_TYPE_QUADRILATERAL;
+            vertex_num = 4;
             break;
           case 5:
-            element.element_tag = VIENNAGRID_ELEMENT_TYPE_TETRAHEDRON;
-            for (int i=0; i<4; i++)
-              element.vertex_indices.push_back(el[elct++]);
+            element.element_type = VIENNAGRID_ELEMENT_TYPE_TETRAHEDRON;
+            vertex_num = 4;
             break;
-          default:mythrow("Element type " << el[elct-1] << " in region " << region.name << " not known");
+          default:
+            mythrow("Element type " << el[elct-1] << " in region " << region.get_name() << " not known");
         }
 
-        region.elements.push_back(element);
+        for (int i=0; i<vertex_num; i++)
+          element.vertices.push_back(el[elct++]);
+        
+        if(extrude_elements)
+          extrude_element(element);
+        
+        std::vector<VertexType> cell_vertices;
+        for(std::vector<int>::iterator it = element.vertices.begin();
+                                        it != element.vertices.end(); ++it)
+        {
+          cell_vertices.push_back(vertices[*it]);
+        }
+        
+        viennagrid::make_element( region, viennagrid::element_tag::from_internal(element.element_type),
+                            cell_vertices.begin(), cell_vertices.end() );
       }
     }
 
     void read_region(const int regnr, const Group &reg)
     {
-      string name=read_string(reg,"name");
-
-      string material;
-      std::stringstream ss;
-      const int typ=read_int(reg,"type");
-      switch (typ)
-      {
-        case 0: // we have a nD region
-          material=read_string(reg,"material");
-          break;
-        case 1: // we have a nD-1 region (contact... drain, source, ...)
-          material="Contact";
-          // attribute "part 0", no idea for what
-          break;
-        case 2:
-          ss << "Interface" << read_int(reg,"bulk 0") << read_int(reg,"bulk 1");
-          material = ss.str();
-          break;
-        //default : mythrow(__LINE__ << ": Unknown type " << typ << " in region " << read_string(reg,"name"));
-        default: std::cerr << __LINE__ << ": Unknown type " << typ << " in region " << read_string(reg,"name") << std::endl;
-         std::cerr << "I do not throw, I only skip\n";
-          return;
-      }
-
-      region[name].regnr=regnr;
-      region[name].name=name;
-      region[name].material=material;
+      string name = read_string(reg,"name");
+      int type = read_int(reg,"type");
+      
+      /*
+       * It seems that:
+       *  0 -> "normal" region
+       *  1 -> contact
+       *  2 -> interface between 2 regions
+       */
+      if(type > 2)
+        mythrow("Unknown region type " << type << " found in " << reg.getObjName());
+      
+      RegionType region = mesh.get_or_create_region(regnr);
+      region.set_name(name);
+      
       const int n=reg.getNumObjs();
       for (int i=0; i<n; i++)
       {
@@ -233,27 +214,25 @@ namespace viennamesh
         if (objname.find("elements_") == 0)
         {
           const DataSet &ds=reg.openDataSet(objname);
-          region[name].nelements=read_int(ds,"number of elements");
-          read_elements(region[name],ds);
+          read_elements(region, ds, type==0 ? false:true);
         }
 
         if (objname.find("part_") == 0)
         {
           const Group &part=reg.openGroup(objname);
-          region[name].nelements=read_int(part,"number of elements");
-          read_elements(region[name],part.openDataSet("elements"));
+          read_elements(region, part.openDataSet("elements"), type==0 ? false:true);
         }
       }
-
     }
 
-    region_t &find_region(int regnr)
+    /*region_t &find_region(int regnr)
     {
       for (std::map<string,region_t>::iterator R=region.begin(); R!=region.end(); R++)
         if (R->second.regnr==regnr)
           return R->second;
+      
       mythrow("Region " << regnr << " not found");
-    }
+    }*/
 
     template <typename RangeT>
     void read_values(const DataSet &values, viennagrid::quantity_field & quantities, RangeT const & el)
@@ -279,8 +258,6 @@ namespace viennamesh
     void read_dataset(const Group &dataset)
     {
       string name = read_string(dataset,"name");
-      if (name.find("Stress")!=name.npos)
-        return;
 
       //string quantity = read_string(dataset,"quantity");
       int regnr = read_int(dataset,"region");
@@ -301,7 +278,7 @@ namespace viennamesh
       // units: take only the unit name
       // Dataset values: the actual values
 
-      string unit;
+      /*string unit;
       int n=dataset.getNumObjs(),i;
       for (i=0; i<n; i++)
       {
@@ -315,7 +292,7 @@ namespace viennamesh
       if (i==n)
       {
         unit=read_string(dataset,"unit:name");
-      }
+      }*/
 
       /*region_t &region=find_region(regnr);
       region.dataset[name].name=name;
@@ -324,8 +301,7 @@ namespace viennamesh
       region.dataset[name].conversion_factor=conversion_factor;
       region.dataset[name].unit=unit;*/
       
-      region_t &reg=find_region(regnr);
-      RegionType region = mesh.get_region(reg.name);
+      RegionType region = mesh.get_region(regnr);
       
       viennagrid::quantity_field & quantities = quantity_fields_[name];
       
@@ -383,20 +359,17 @@ namespace viennamesh
       if (dum!=1)
         mythrow("Number of states not one");
 
+      const Group &trans=geometry.openGroup("transformation");
+      read_transformation(trans);
+      const DataSet &vert=geometry.openDataSet("vertex");
+      read_vertex(vert);
+      
       for (int i=0; i<nregions; i++)
       {
         sprintf(name,"region_%d",i);
         const Group &reg=geometry.openGroup(name);
         read_region(i,reg);
       }
-
-      const Group &trans=geometry.openGroup("transformation");
-      read_transformation(trans);
-      const DataSet &vert=geometry.openDataSet("vertex");
-      read_vertex(vert);
-      // What do the Units???
-      
-      to_viennagrid();
       
       read_attribs0(geometry.openGroup("state_0"));
       extrude_contacts_quantity_fields();
@@ -431,135 +404,70 @@ namespace viennamesh
     {
       return viennagrid::cross_prod( p1-p0, p2-p0 );
     }
-
-    bool to_viennagrid()
+    
+    void extrude_element(element_t & element)
     {
-      viennagrid_element_type cell_type = VIENNAGRID_ELEMENT_TYPE_VERTEX;
-      for (std::map<string,region_t>::iterator S=region.begin(); S!=region.end(); S++)
+      PointType center;
+      PointType normal;
+      double size = 0;
+
+      viennagrid_element_type contact_tag = VIENNAGRID_ELEMENT_TYPE_NO_ELEMENT;
+      if (element.element_type == VIENNAGRID_ELEMENT_TYPE_LINE)
       {
-        std::vector<element_t> &elements=S->second.elements;
-        for (std::vector<element_t>::iterator E=elements.begin(); E!=elements.end(); E++)
-        {
-          element_t const & e = *E;
-          cell_type = viennagrid_topological_max( cell_type, e.element_tag );
-        }
+        PointType p0 = viennagrid::get_point( vertices[element.vertices[0]] );
+        PointType p1 = viennagrid::get_point( vertices[element.vertices[1]] );
+
+        center = (p0+p1)/2;
+        normal = normal_vector(p0, p1);
+
+        size = std::max(viennagrid::distance(center, p0), viennagrid::distance(center, p1));
+        contact_tag = VIENNAGRID_ELEMENT_TYPE_TRIANGLE;
+      }
+      else if (element.element_type == VIENNAGRID_ELEMENT_TYPE_TRIANGLE)
+      {
+        PointType p0 = viennagrid::get_point( vertices[element.vertices[0]] );
+        PointType p1 = viennagrid::get_point( vertices[element.vertices[1]] );
+        PointType p2 = viennagrid::get_point( vertices[element.vertices[2]] );
+
+        center = (p0+p1+p2)/3;
+        normal = normal_vector(p0, p1, p2);
+
+        size = std::max(viennagrid::distance(center, p0), viennagrid::distance(center, p1));
+        size = std::max(size, viennagrid::distance(center, p2));
+        
+        contact_tag = VIENNAGRID_ELEMENT_TYPE_TETRAHEDRON;
+      }
+      else
+      {
+        std::cout << "NOT SUPPORTED" << std::endl;
       }
 
+      normal.normalize();
+      normal *= size * extrude_contacts_scale;
 
-      std::map<string, region_contacts<VertexType> > contact_elements;
+      PointType new_vertex = center + normal;
 
-      for (std::map<string,region_t>::iterator S=region.begin(); S!=region.end(); S++)
+      typedef typename viennagrid::result_of::cell_range<MeshT>::type CellRangeType;
+      typedef typename viennagrid::result_of::iterator<CellRangeType>::type CellIteratorType;
+
+      CellRangeType cells(mesh);
+      CellIteratorType cit = cells.begin();
+      for (; cit != cells.end(); ++cit)
       {
-        string region_name = S->second.name;
-
-        std::vector<element_t> &elements=S->second.elements;
-        for (std::vector<element_t>::iterator E=elements.begin(); E!=elements.end(); E++)
-        {
-          element_t const & e = *E;
-
-          std::vector<VertexType> cell_vertices(e.vertex_indices.size());
-          for (std::size_t i = 0; i < e.vertex_indices.size(); ++i)
-            cell_vertices[i] = vertices[e.vertex_indices[i]];
-
-          if (e.element_tag == cell_type)
-          {
-            viennagrid::make_element( mesh.get_or_create_region(region_name),
-                                      viennagrid::element_tag::from_internal(e.element_tag),
-                                      cell_vertices.begin(), cell_vertices.end() );
-          }
-          else
-          {
-            contact_elements[region_name].region_name = region_name + "_contact";
-            contact_elements[region_name].elements.push_back(e);
-          }
-        }
+        if ( viennagrid::is_inside(*cit, new_vertex) )
+          break;
       }
 
-      if (extrude_contacts)
-      {
-        for (typename std::map<string, region_contacts<VertexType> >::iterator rc = contact_elements.begin(); rc != contact_elements.end(); ++rc)
-        {
-          for (std::size_t i = 0; i < rc->second.elements.size(); ++i)
-          {
-            element_t const & element = rc->second.elements[i];
-//             std::vector<VertexType> handles = rc->second.vertex_handles[i];
+      if (cit != cells.end())
+        new_vertex = center - normal;
 
-            PointType center;
-            PointType normal;
-            double size = 0;
-
-            viennagrid_element_type contact_tag = VIENNAGRID_ELEMENT_TYPE_NO_ELEMENT;
-            if (element.element_tag == VIENNAGRID_ELEMENT_TYPE_LINE)
-            {
-              PointType p0 = viennagrid::get_point( vertices[element.vertex_indices[0]] );
-              PointType p1 = viennagrid::get_point( vertices[element.vertex_indices[1]] );
-
-              center = (p0+p1)/2;
-              normal = normal_vector(p0, p1);
-
-              size = std::max(size, viennagrid::distance(center, p0));
-              size = std::max(size, viennagrid::distance(center, p1));
-              contact_tag = VIENNAGRID_ELEMENT_TYPE_TRIANGLE;
-            }
-            else if (element.element_tag == VIENNAGRID_ELEMENT_TYPE_TRIANGLE)
-            {
-              PointType p0 = viennagrid::get_point( vertices[element.vertex_indices[0]] );
-              PointType p1 = viennagrid::get_point( vertices[element.vertex_indices[1]] );
-              PointType p2 = viennagrid::get_point( vertices[element.vertex_indices[2]] );
-
-              center = (p0+p1+p2)/3;
-              normal = normal_vector(p0, p1, p2);
-
-              size = std::max(size, viennagrid::distance(center, p0));
-              size = std::max(size, viennagrid::distance(center, p1));
-              size = std::max(size, viennagrid::distance(center, p2));
-              contact_tag = VIENNAGRID_ELEMENT_TYPE_TETRAHEDRON;
-            }
-            else
-            {
-              std::cout << "NOT SUPPORTED" << std::endl;
-            }
-
-            normal /= viennagrid::norm_2(normal);
-            normal *= size * extrude_contacts_scale;
-
-            PointType other_vertex = center + normal;
-
-            typedef typename viennagrid::result_of::cell_range<MeshT>::type CellRangeType;
-            typedef typename viennagrid::result_of::iterator<CellRangeType>::type CellIteratorType;
-
-            CellRangeType cells(mesh);
-            CellIteratorType cit = cells.begin();
-            for (; cit != cells.end(); ++cit)
-            {
-              if ( viennagrid::is_inside(*cit, other_vertex) )
-                break;
-            }
-
-            if (cit != cells.end())
-              other_vertex = center - normal;
-
-            std::vector<VertexType> cell_vertices;
-            std::vector<int> other_vertex_indices;
-
-//             for (auto index : element.vertex_indices)
-            for (std::vector<int>::const_iterator it = element.vertex_indices.begin(); it != element.vertex_indices.end(); ++it)
-            {
-              cell_vertices.push_back( vertices[*it] );
-              other_vertex_indices.push_back( vertices[*it].id() );
-            }
-            cell_vertices.push_back( viennagrid::make_vertex(mesh, other_vertex) );
-            newly_created_vertices[ cell_vertices.back().id() ] = other_vertex_indices;
-
-            viennagrid::make_element( mesh.get_or_create_region(rc->second.region_name),
-                                      viennagrid::element_tag::from_internal(contact_tag),
-                                      cell_vertices.begin(), cell_vertices.end() );
-          }
-        }
-      }
-
-
-      return true;
+      VertexType v = viennagrid::make_vertex(mesh, new_vertex);
+      
+      vertices.push_back(v);
+      newly_created_vertices[v.id()] = element.vertices;
+      
+      element.vertices.push_back(v.id());
+      element.element_type = contact_tag;
     }
 
     /* sets quantity field values for vertices and elements created when extruding contacts */
