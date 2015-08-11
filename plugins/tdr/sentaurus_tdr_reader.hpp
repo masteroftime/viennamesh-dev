@@ -17,46 +17,32 @@
 
 #include <string>
 #include <fstream>
-#include <set>
 #include <map>
 #include <vector>
-#include <typeinfo>
-#include <cstdlib>
+#include <stdexcept>
+#include <iostream>
 #include <boost/shared_ptr.hpp>
 #include <boost/scoped_array.hpp>
 #include <boost/array.hpp>
 
-using std::string;
-
-#include <iostream>
-#include "H5Cpp.h"
-
-#ifndef H5_NO_NAMESPACE
-using namespace H5;
-#endif
-#define FALSE   0
-
-#define mythrow(a) { std::cerr << a << std::endl; throw; }
-
-
 #include "viennagridpp/mesh/element_creation.hpp"
 #include "viennagridpp/quantity_field.hpp"
-
 #include "viennagridpp/algorithm/cross_prod.hpp"
-#include "viennagridpp/algorithm/centroid.hpp"
 #include "viennagridpp/algorithm/inclusion.hpp"
-#include "viennagridpp/algorithm/geometry.hpp"
 #include "viennagridpp/algorithm/distance.hpp"
-#include "viennagridpp/algorithm/norm.hpp"
+
+#include "viennameshpp/logger.hpp"
+
+#include "H5Cpp.h"
+
+using std::string;
+using namespace H5;
+
+#define mythrow(a) { std::ostringstream s; s << a; throw std::runtime_error(s.str()); }
 
 
 namespace viennamesh
 {
-
-  // Operator function
-  //herr_t get_all_groups(hid_t loc_id, const char *name, void *opdata);
-  //herr_t file_info(hid_t loc_id, const char *name, void *opdata);
-
   int read_int(const H5Object &g, const string name);
   double read_double(const H5Object &g, const string name);
   string read_string(const H5Object &g, const string name);
@@ -389,7 +375,7 @@ namespace viennamesh
         mythrow("Not only one geometry");
       
       if (read_int(collection,"number of plots") != 0)
-        fprintf(stderr,"We have plots, skip them\n");
+        viennamesh::warning(1) << "file contains plots, skip them" << std::endl;
       
       read_geometry(collection.openGroup("geometry_0"));
     }
@@ -449,7 +435,7 @@ namespace viennamesh
       }
       else
       {
-        std::cout << "NOT SUPPORTED" << std::endl;
+        mythrow("extruding elements of type " << viennagrid_element_type_string(element.element_type) << " is not supported");
       }
 
       normal.normalize();
@@ -482,6 +468,9 @@ namespace viennamesh
     
     void fill_triangle(ElementType const & element, RegionType const & region)
     {
+      if(!element.is_triangle())
+        mythrow("fill_triangle_contacts works only with triangles");
+      
       typedef typename viennagrid::result_of::neighbor_range<RegionType>::type NeighborElementRangeType;
       typedef typename viennagrid::result_of::iterator<NeighborElementRangeType>::type NeighborElementRangeIterator;
       

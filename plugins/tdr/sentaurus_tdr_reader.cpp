@@ -44,12 +44,8 @@ namespace viennamesh
     if (a.getTypeClass()!=H5T_STRING)
       mythrow("Wrong class in atrribute");
 
-    char * buf = new char[a.getDataType().getSize()+1];
-    a.read(a.getDataType(),buf);
-    buf[a.getDataType().getSize()]='\0';
-
-    string result(buf);
-    delete[] buf;
+    string result;
+    a.read(a.getDataType(), result);
 
     return result;
   }

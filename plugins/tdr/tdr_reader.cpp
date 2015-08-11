@@ -15,8 +15,8 @@
 #include <memory>
 
 #include "tdr_reader.hpp"
-#include "sentaurus_tdr_reader.hpp"
 #include "viennameshpp/core.hpp"
+#include "sentaurus_tdr_reader.hpp"
 
 namespace viennamesh
 {
@@ -58,8 +58,12 @@ namespace viennamesh
     else
       geometry.fill_triangle_contacts = false;
 
-
-    geometry.read_file(full_filename);
+    try {
+      geometry.read_file(full_filename);
+    } catch (std::runtime_error &e) {
+      error(1) << e.what() << std::endl;
+      return false;
+    }
 
 
     std::vector<viennagrid::quantity_field> quantity_fields = geometry.quantity_fields();
