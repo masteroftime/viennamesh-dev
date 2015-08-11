@@ -22,7 +22,9 @@
 #include <vector>
 #include <typeinfo>
 #include <cstdlib>
+#include <boost/shared_ptr.hpp>
 #include <boost/scoped_array.hpp>
+#include <boost/array.hpp>
 
 using std::string;
 
@@ -72,28 +74,39 @@ namespace viennamesh
   {
     typedef typename viennagrid::result_of::point<MeshT>::type PointType;
     typedef typename viennagrid::result_of::element<MeshT>::type VertexType;
+    typedef typename viennagrid::result_of::element<MeshT>::type ElementType;
     typedef typename viennagrid::result_of::region<MeshT>::type RegionType;
     
     unsigned int nvertices;
     int dim,nregions,ndatasets;
-    double trans_matrix[9],trans_move[3];
-    std::map< int, std::vector<int> > newly_created_vertices;
     
     MeshT const & mesh;
     std::vector<VertexType> vertices;
+    std::map< int, std::vector<int> > newly_created_vertices;
     std::map<std::string, viennagrid::quantity_field> quantity_fields_;
     
     bool extrude_contacts;
     double extrude_contacts_scale;
+    bool fill_triangle_contacts;
     
     tdr_geometry(MeshT const & mesh) : mesh(mesh) {}
 
     void read_transformation(const Group &trans)
     {
+      boost::array<double, 9> trans_matrix, identity_matrix;
+      boost::array<double, 3> trans_vector, zero_vector;
+      
+      zero_vector.fill(0);
+      identity_matrix.fill(0);
+      identity_matrix[0] = identity_matrix[4] = identity_matrix[8] = 1;
+      
       const DataSet &A=trans.openDataSet("A");
       const DataSet &b=trans.openDataSet("b");
-      A.read( trans_matrix, PredType::NATIVE_DOUBLE);
-      b.read( trans_move, PredType::NATIVE_DOUBLE);
+      A.read( trans_matrix.elems, PredType::NATIVE_DOUBLE);
+      b.read( trans_vector.elems, PredType::NATIVE_DOUBLE);
+      
+      if(trans_matrix != identity_matrix || trans_vector != zero_vector)
+        mythrow("transformation not equal to identity");
     }
 
     typedef struct coord2_t {
@@ -137,7 +150,7 @@ namespace viennamesh
       }
     }
 
-    void read_elements(RegionType region, const DataSet &elem, bool extrude_elements)
+    void read_elements(RegionType region, int region_type, const DataSet &elem)
     {
       hsize_t size = get_dataset_size(elem);
 
@@ -175,7 +188,7 @@ namespace viennamesh
         for (int i=0; i<vertex_num; i++)
           element.vertices.push_back(el[elct++]);
         
-        if(extrude_elements)
+        if(region_type != 0 && extrude_contacts)
           extrude_element(element);
         
         std::vector<VertexType> cell_vertices;
@@ -185,8 +198,11 @@ namespace viennamesh
           cell_vertices.push_back(vertices[*it]);
         }
         
-        viennagrid::make_element( region, viennagrid::element_tag::from_internal(element.element_type),
+        ElementType e = viennagrid::make_element( region, viennagrid::element_tag::from_internal(element.element_type),
                             cell_vertices.begin(), cell_vertices.end() );
+        
+        if(region_type != 0 && extrude_contacts && fill_triangle_contacts)
+          fill_triangle(e, region);
       }
     }
 
@@ -214,25 +230,16 @@ namespace viennamesh
         if (objname.find("elements_") == 0)
         {
           const DataSet &ds=reg.openDataSet(objname);
-          read_elements(region, ds, type==0 ? false:true);
+          read_elements(region, type, ds);
         }
 
         if (objname.find("part_") == 0)
         {
           const Group &part=reg.openGroup(objname);
-          read_elements(region, part.openDataSet("elements"), type==0 ? false:true);
+          read_elements(region, type, part.openDataSet("elements"));
         }
       }
     }
-
-    /*region_t &find_region(int regnr)
-    {
-      for (std::map<string,region_t>::iterator R=region.begin(); R!=region.end(); R++)
-        if (R->second.regnr==regnr)
-          return R->second;
-      
-      mythrow("Region " << regnr << " not found");
-    }*/
 
     template <typename RangeT>
     void read_values(const DataSet &values, viennagrid::quantity_field & quantities, RangeT const & el)
@@ -314,11 +321,10 @@ namespace viennamesh
       typedef typename viennagrid::result_of::const_vertex_range<RegionType>::type VertexRangeType;
 
       VertexRangeType vertices(region);
-
       read_values(dataset.openDataSet("values"), quantities, vertices);
     }
 
-    void read_attribs0(const Group &state)
+    void read_datasets(const Group &state)
     {
       if (read_int(state,"number of plots") != 0)
         mythrow("Numberofplots not equal 0");
@@ -341,28 +347,23 @@ namespace viennamesh
 
     void read_geometry(const Group &geometry)
     {
-      int typ,dum;
+      int type,dum,nregions;
       char name[100];
-      typ=read_int(geometry,"type");
-      switch (typ)
-      {
-        case 1: break;
-        default : mythrow(__LINE__ << ": Unknown type " << typ << " in geometry");
-      }
-      dim=read_int(geometry,"dimension");
-
-      nvertices=read_int(geometry,"number of vertices");
-
-      nregions=read_int(geometry,"number of regions");
-
+      
+      type=read_int(geometry,"type");
       dum=read_int(geometry,"number of states");
+      dim=read_int(geometry,"dimension");
+      nvertices=read_int(geometry,"number of vertices");
+      nregions=read_int(geometry,"number of regions");
+      
+      if(type != 1)
+        mythrow("Unknown geometry type " << type << " in " << geometry.getObjName());
+
       if (dum!=1)
         mythrow("Number of states not one");
 
-      const Group &trans=geometry.openGroup("transformation");
-      read_transformation(trans);
-      const DataSet &vert=geometry.openDataSet("vertex");
-      read_vertex(vert);
+      read_transformation(geometry.openGroup("transformation"));
+      read_vertex(geometry.openDataSet("vertex"));
       
       for (int i=0; i<nregions; i++)
       {
@@ -371,21 +372,25 @@ namespace viennamesh
         read_region(i,reg);
       }
       
-      read_attribs0(geometry.openGroup("state_0"));
+      read_datasets(geometry.openGroup("state_0"));
       extrude_contacts_quantity_fields();
     }
 
-    void read_collection(const Group &collection)
+    void read_file(const string &filename)
     {
-      int i;
+      boost::shared_ptr<H5File> file( new H5File(filename.c_str(), H5F_ACC_RDWR) );
 
-      i=read_int(collection,"number of geometries");
-      if (i!=1)
+      if (file->getNumObjs()!=1)
+        mythrow("File has not exactly one collection (number of collections = " << file->getNumObjs());
+
+      const Group &collection = file->openGroup("collection");
+      
+      if (read_int(collection,"number of geometries") != 1)
         mythrow("Not only one geometry");
-      i=read_int(collection,"number of plots");
-      if (i!=0)
+      
+      if (read_int(collection,"number of plots") != 0)
         fprintf(stderr,"We have plots, skip them\n");
-
+      
       read_geometry(collection.openGroup("geometry_0"));
     }
 
@@ -405,13 +410,18 @@ namespace viennamesh
       return viennagrid::cross_prod( p1-p0, p2-p0 );
     }
     
+    /*
+     * This function increases the topological dimension of the given element.
+     * It is used on contact elements because they have a topological dimension
+     * which is less than the cell dimension
+     */
     void extrude_element(element_t & element)
     {
       PointType center;
       PointType normal;
       double size = 0;
 
-      viennagrid_element_type contact_tag = VIENNAGRID_ELEMENT_TYPE_NO_ELEMENT;
+      viennagrid_element_type extruded_type = VIENNAGRID_ELEMENT_TYPE_NO_ELEMENT;
       if (element.element_type == VIENNAGRID_ELEMENT_TYPE_LINE)
       {
         PointType p0 = viennagrid::get_point( vertices[element.vertices[0]] );
@@ -421,7 +431,7 @@ namespace viennamesh
         normal = normal_vector(p0, p1);
 
         size = std::max(viennagrid::distance(center, p0), viennagrid::distance(center, p1));
-        contact_tag = VIENNAGRID_ELEMENT_TYPE_TRIANGLE;
+        extruded_type = VIENNAGRID_ELEMENT_TYPE_TRIANGLE;
       }
       else if (element.element_type == VIENNAGRID_ELEMENT_TYPE_TRIANGLE)
       {
@@ -435,7 +445,7 @@ namespace viennamesh
         size = std::max(viennagrid::distance(center, p0), viennagrid::distance(center, p1));
         size = std::max(size, viennagrid::distance(center, p2));
         
-        contact_tag = VIENNAGRID_ELEMENT_TYPE_TETRAHEDRON;
+        extruded_type = VIENNAGRID_ELEMENT_TYPE_TETRAHEDRON;
       }
       else
       {
@@ -467,7 +477,45 @@ namespace viennamesh
       newly_created_vertices[v.id()] = element.vertices;
       
       element.vertices.push_back(v.id());
-      element.element_type = contact_tag;
+      element.element_type = extruded_type;
+    }
+    
+    void fill_triangle(ElementType const & element, RegionType const & region)
+    {
+      typedef typename viennagrid::result_of::neighbor_range<RegionType>::type NeighborElementRangeType;
+      typedef typename viennagrid::result_of::iterator<NeighborElementRangeType>::type NeighborElementRangeIterator;
+      
+      NeighborElementRangeType neighbor_triangles(region, element, 0, 2);
+      for (NeighborElementRangeIterator ntit = neighbor_triangles.begin(); ntit != neighbor_triangles.end(); ++ntit)
+      {
+        boost::array<VertexType, 3> triangle;
+        
+        // find shared vertex
+        for (int i = 0; i != 3; ++i)
+          for (int j = 0; j != 3; ++j)
+          {
+            if ( viennagrid::vertices(element)[i] == viennagrid::vertices(*ntit)[j] )
+              triangle[0] = viennagrid::vertices(element)[i];
+          }
+
+        // find newly created vertex in this triangle
+        for (int i = 0; i != 3; ++i)
+        {
+          if (viennagrid::regions(mesh, viennagrid::vertices(element)[i]).size() == 1)
+            triangle[1] = viennagrid::vertices(element)[i];
+        }
+
+        // find newly created vertex in neighbor triangle
+        for (int i = 0; i != 3; ++i)
+        {
+          if (viennagrid::regions(mesh, viennagrid::vertices(*ntit)[i]).size() == 1)
+            triangle[2] = viennagrid::vertices(*ntit)[i];
+        }
+
+        std::sort( triangle.begin(), triangle.end() );
+        
+        viennagrid::make_element(region, viennagrid::element_tag::triangle(), triangle.begin(), triangle.end());
+      }
     }
 
     /* sets quantity field values for vertices and elements created when extruding contacts */
@@ -494,6 +542,7 @@ namespace viennamesh
       }
     }
 
+    /* returns a vector of all quantity fields read from the file */
     std::vector<viennagrid::quantity_field> quantity_fields()
     {
       std::vector<viennagrid::quantity_field> results;
