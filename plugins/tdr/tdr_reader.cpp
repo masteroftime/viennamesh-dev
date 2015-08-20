@@ -31,7 +31,7 @@ namespace viennamesh
     std::string path = base_path();
     std::string full_filename;
 
-    if (!path.empty())
+    if (!path.empty() && filename()[0] != '/')
     {
       info(1) << "Using base path: " << path << std::endl;
       full_filename = path + "/" + filename();
