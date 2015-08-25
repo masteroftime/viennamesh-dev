@@ -82,16 +82,15 @@ namespace viennamesh
   class tdr_region {
     friend class tdr_element;
     typedef std::vector<tdr_element>::iterator element_iter;
-    typedef std::set<int>::iterator vertex_iter;
     
     int id;
     string name;
-    int type;   //TODO: is this needed?
+    int type;
     
     std::set<int> vertices;
     std::vector<tdr_element> elements;
-    //std::vector<int> new_vertices;
-    //std::vector<int> new_elements;
+    std::vector<int> element_indices;
+    std::vector<int> extruded_vertices;
     
   public:
     void read(int regnr, const Group &reg)
@@ -130,6 +129,13 @@ namespace viennamesh
     {
       typedef typename tdr_geometry<MeshT>::RegionType RegionType;
       
+      //TODO: Handle type 2 regions?
+      if(type == 2)
+      {
+        warning(0) << "Type 2 regions (interfaces) are ignored!" << std::endl;
+        return;
+      }
+      
       RegionType reg = geometry->mesh.get_or_create_region(id);
       reg.set_name(name);
       
@@ -146,11 +152,77 @@ namespace viennamesh
         mythrow("Quantity field " << quantity.get_name() << " in region " << id << " has invalid size");
       
       int i = 0;
-      for(vertex_iter it= vertices.begin(); it != vertices.end(); ++it)
+      std::set<int>::iterator vertex = vertices.begin();
+      for(; vertex != vertices.end(); ++vertex)
       {
-        quantity.set(*it, values[i++]);
+        quantity.set(*vertex, values[i++]);
       }
     }
+    
+    void apply_quantity(viennagrid::quantity_field & quantity, const std::vector<double> & values, int location_type)
+    {
+      switch(location_type) {
+        case 0:
+          apply_quantity(quantity, values, vertices);
+          break;
+        case 3:
+          apply_quantity(quantity, values, element_indices);
+          break;
+        default:
+          mythrow("Invalid location type in quantity field " << quantity.get_name());
+      }
+    }
+    
+    template <typename MeshT>
+    void extrude_quantities(tdr_geometry<MeshT> * geometry)
+    {
+      typedef typename tdr_geometry<MeshT>::VertexType VertexType;
+      typedef typename tdr_geometry<MeshT>::RegionType RegionType;
+      typedef typename viennagrid::result_of::neighbor_range<MeshT>::type NeighborRangeType;
+      typedef typename viennagrid::result_of::cell_range<RegionType>::type CellRangeType;
+      typedef typename viennagrid::result_of::iterator<CellRangeType>::type CellIteratorType;
+      
+      //TODO: Handle type 2 regions?
+      if(type == 1)
+      {
+        std::map<string, viennagrid::quantity_field>::iterator qit = geometry->quantities.begin();
+        for(; qit != geometry->quantities.end(); ++qit)
+        {
+          viennagrid::quantity_field & quantity = qit->second;
+          int dimension = quantity.topologic_dimension();
+          
+          if(dimension == 0)
+          {
+            std::vector<int>::const_iterator it = extruded_vertices.begin();
+            for(; it != extruded_vertices.end(); ++it)
+            {
+              VertexType v = geometry->vertices[*it];
+              NeighborRangeType neighbor_vertices(geometry->mesh, v, 1, 0);
+              
+              quantity.set(v, get_neighbor_average(quantity, neighbor_vertices));
+            }
+          }
+          else if(dimension == geometry->dim)
+          {
+            RegionType reg = geometry->mesh.get_or_create_region(id);
+            CellRangeType cells(reg);
+            
+            CellIteratorType cell = cells.begin();
+            for(; cell != cells.end(); ++cell)
+            {
+              NeighborRangeType neighbor_cells(geometry->mesh, *cell, dimension-1, dimension);
+              quantity.set(*cell, get_neighbor_average(quantity, neighbor_cells));
+            }
+          }
+          else
+          {
+            mythrow("connot extrude quantity field of topological dimension " << dimension);
+          }
+        }
+      }
+    }
+    
+    int get_type() {return type;}
     
   private:
     void read_elements(const DataSet &elem)
@@ -166,13 +238,36 @@ namespace viennamesh
       while(el != el_end)
         elements.push_back(tdr_element(this, el, el_end));
     }
+    
+    template <typename ContainerT>
+    void apply_quantity(viennagrid::quantity_field & quantity, const std::vector<double> & values, const ContainerT & target)
+    {
+      if(values.size() != target.size())
+        mythrow("Quantity field " << quantity.get_name() << " in region " << id << " has invalid size");
+      
+      int i = 0;
+      typename ContainerT::const_iterator t = target.begin();
+      for(; t != target.end(); ++t)
+      {
+        quantity.set(*t, values[i++]);
+      }
+    }
+    
+    template <typename NeighborRangeType>
+    inline double get_neighbor_average(const viennagrid::quantity_field & quantity, NeighborRangeType &neighbors)
+    {
+      typedef typename viennagrid::result_of::iterator<NeighborRangeType>::type NeighborIteratorType;
+      double value = 0;
+      int i = 0;
+      
+      NeighborIteratorType neighbor = neighbors.begin();
+      for(; neighbor != neighbors.end(); ++neighbor, ++i)
+      {
+        value += quantity.get(*neighbor);
+      }
+      return value / (double)i;
+    }
   };
-  
-  /*struct element_t
-  {
-    viennagrid_element_type element_type;
-    std::vector<int> vertices;
-  };*/
   
   //TODO: turn to class + access specifiers
   template<typename MeshT>
@@ -294,8 +389,8 @@ namespace viennamesh
         mythrow("Location type " << location_type << " in dataset " << name << " not supported");
       
       //TODO: Conversion factor???
-      if (read_double(dataset,"conversion factor") != 1.0)
-       mythrow("Dataset " << name << " conversion factor not 1.0");
+      //if (read_double(dataset,"conversion factor") != 1.0)
+      // mythrow("Dataset " << name << " conversion factor not 1.0");
 
       if (read_int(dataset,"structure type") != 0)
         mythrow("Dataset " << name << " structure type not 0");
@@ -303,9 +398,13 @@ namespace viennamesh
       if (read_int(dataset,"value type") != 2)
         mythrow("Dataset " << name << " value type not 2");
       
+      tdr_region & region = regions[regnr];
+      
+      //TODO:: Handle type 2 regions?
+      if(region.get_type() == 2)
+        return;
       
       viennagrid::quantity_field & quantity = quantities[name];
-      tdr_region & region = regions[regnr];
       
       if(quantity.get_name() != name)
       {
@@ -319,14 +418,11 @@ namespace viennamesh
       }
       
       if(quantity.unit() != unit)
-        mythrow("Units not the same in all regions in quantity field " << name);
+        mythrow("Units not the same in all regions in quantity field " << name << " - " << dataset.getObjName());
       
       std::vector<double> values = read_vector(dataset.openDataSet("values"));
       
-      if(location_type == 0)
-      {
-        region.apply_vertex_quantity(quantity, values);
-      }
+      region.apply_quantity(quantity, values, location_type);
     }
 
     void read_datasets(const Group &state)
@@ -372,9 +468,12 @@ namespace viennamesh
         it->add_to_mesh(this);
       }
       
-      //read_datasets(geometry.openGroup("state_0"));
+      read_datasets(geometry.openGroup("state_0"));
       
-      //extrude_contacts_quantity_fields();
+      for(region_iterator it = regions.begin(); it != regions.end(); ++it)
+      {
+        it->extrude_quantities(this);
+      }
     }
 
     void read_file(const string &filename)
@@ -608,6 +707,7 @@ namespace viennamesh
   void tdr_element::add_to_mesh(tdr_geometry<MeshT> * geometry, RegionT & reg)
   {
     typedef typename tdr_geometry<MeshT>::VertexType VertexType;
+    typedef typename tdr_geometry<MeshT>::ElementType ElementType;
     
     if(geometry->extrude_contacts && region->type != 0)
       extrude(geometry);
@@ -620,8 +720,10 @@ namespace viennamesh
       cell_vertices.push_back(geometry->vertices[*it]);
     }
   
-    viennagrid::make_element( reg, element_type,
+    ElementType el = viennagrid::make_element( reg, element_type,
                       cell_vertices.begin(), cell_vertices.end() );
+    
+    region->element_indices.push_back(el.id());
   }
     
   template <typename MeshT>
@@ -634,28 +736,6 @@ namespace viennamesh
     PointType center;
     PointType normal;
     double size = 0;
-    
-    /*normal = viennagrid::normal_vector(viennagrid::mesh_point_accessor(mesh), element);
-    center = viennagrid::centroid(viennagrid::mesh_point_accessor(mesh), element);
-    
-    viennagrid_element_type extruded_type;
-    if(element.is_line())
-    {
-      extruded_type = VIENNAGRID_ELEMENT_TYPE_TRIANGLE;
-      size = viennagrid::distance(viennagrid::vertices(element)[0], viennagrid::vertices(element)[1]) / 2.0;
-    }
-    else if(element.is_triangle())
-    {
-      extruded_type = VIENNAGRID_ELEMENT_TYPE_TETRAHEDRON;
-      
-      size = viennagrid::volume(viennagrid::mesh_point_accessor(mesh), element);
-//         size = std::max(viennagrid::distance(center, viennagrid::vertices(element)[0]), viennagrid::distance(center, viennagrid::vertices(element)[1]));
-//         size = std::max(size, viennagrid::distance(center, viennagrid::vertices(element)[2]));
-    }
-    else
-    {
-      mythrow("extruding elements of type " << viennagrid_element_type_string(element.element_type) << " is not supported");
-    }*/
     
     if (element_type.is_line())
     {
@@ -705,6 +785,7 @@ namespace viennamesh
       new_vertex = center - normal;
 
     vertices.push_back(geometry->vertices.size());
+    region->extruded_vertices.push_back(geometry->vertices.size());
     geometry->vertices.push_back(viennagrid::make_vertex(geometry->mesh, new_vertex));
   }
     
