@@ -93,6 +93,10 @@ std::vector< double > read_vector(const DataSet& dataset)
         element_type = viennagrid::element_tag::quadrilateral();
         vertex_num = 4;
         break;
+      case 4:
+        element_type = viennagrid::element_tag::polygon();
+        vertex_num = *begin++;
+        break;
       case 5:
         element_type = viennagrid::element_tag::tetrahedron();
         vertex_num = 4;

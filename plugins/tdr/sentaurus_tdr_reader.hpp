@@ -453,11 +453,17 @@ namespace viennamesh
       dim = read_int(geometry,"dimension");
       nvertices = read_int(geometry,"number of vertices");
       
-      if(type != 1)
+      if(type != 0 && type != 1)
         mythrow("Unknown geometry type " << type << " in " << geometry.getObjName());
 
-      if (dum != 1)
+      if (type == 1 && dum != 1)
         mythrow("Number of states not one");
+      
+      if(type == 0 && extrude_contacts)
+      {
+        warning(0) << "extrude_contacts not available with geometry type 0" << std::endl;
+        extrude_contacts = false;
+      }
 
       read_transformation(geometry.openGroup("transformation"));
       read_vertices(geometry.openDataSet("vertex"));
@@ -468,11 +474,14 @@ namespace viennamesh
         it->add_to_mesh(this);
       }
       
-      read_datasets(geometry.openGroup("state_0"));
-      
-      for(region_iterator it = regions.begin(); it != regions.end(); ++it)
+      if(type == 1)
       {
-        it->extrude_quantities(this);
+        read_datasets(geometry.openGroup("state_0"));
+        
+        for(region_iterator it = regions.begin(); it != regions.end(); ++it)
+        {
+          it->extrude_quantities(this);
+        }
       }
     }
 
