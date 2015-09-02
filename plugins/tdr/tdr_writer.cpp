@@ -43,7 +43,12 @@ bool tdr_writer::run(viennamesh::algorithm_handle &)
   
   try
   {
-    write_to_tdr(filename(), input_mesh(), (quantities.valid() ? quantities.get_vector() : std::vector<viennagrid::quantity_field>()));
+    std::vector<viennagrid::quantity_field> quantity_vector;
+    if(quantities.valid())
+      quantity_vector = quantities.get_vector();
+    
+    sentaurus_tdr_writer w(filename(), input_mesh(), quantity_vector);
+    w.write_to_tdr();
   }
   catch (tdr_writer_error const & e)
   {
