@@ -113,13 +113,5 @@ std::vector< double > read_vector(const DataSet& dataset)
       region->vertices.insert(*begin);
       vertices.push_back(*begin++);
     }
-    
-    /*if(region_type != 0 && extrude_contacts)
-      extrude_element(element);
-      
-      if(region_type != 0 && extrude_contacts && fill_triangle_contacts) 
-        fill_triangle(e, region);*/
-    
-    
   }
 }

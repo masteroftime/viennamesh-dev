@@ -49,7 +49,11 @@ namespace viennamesh
   int read_int(const H5Object &g, const string name);
   double read_double(const H5Object &g, const string name);
   string read_string(const H5Object &g, const string name);
+  
+  // get the number of values in the given dataset
   hsize_t get_dataset_size(const DataSet& dataset);
+  
+  // return a vector of all values in the given dataset
   std::vector<double> read_vector(const DataSet& dataset);
 
   
@@ -57,17 +61,37 @@ namespace viennamesh
   struct tdr_geometry;
   class tdr_region;
   
+  /*
+   * This class is responsible for the construction of elements from the
+   * tdr data and adding these elements to the mesh/regions.
+   */
   class tdr_element {
     tdr_region* region;
     viennagrid::element_tag element_type;
     std::vector<int> vertices;
     
   public:
+    /*
+     * Constructs the element from raw data read from the tdr file.
+     * The parameter begin points to the first value of that element
+     * in the element list (the element type) and is modified so that
+     * it points to the next element after this method finishes. The
+     * paramter end should point to the end of the element list (not the element)
+     * and is just used to prevent reading beyond the end of the vector.
+     */
     tdr_element(tdr_region* region, int* & begin, int* end);
     
+    /*
+     * Constructs viennagrid element and adss it to the mesh
+     */
     template<typename MeshT, typename RegionT>
     void add_to_mesh(tdr_geometry<MeshT> * geometry, RegionT & reg);
     
+    /*
+     * Extrudes this element (line -> triangle, triangle -> tetrahedron).
+     * This method is applied to all elements in interface regions if
+     * "extrude_contacts" is set.
+     */
     template <typename MeshT>
     void extrude(tdr_geometry<MeshT> * geometry);
     
@@ -85,29 +109,50 @@ namespace viennamesh
     
     int id;
     string name;
+    std::vector<tdr_element> elements;
+    
+    
+    /*
+     * A region can have one of the following types:
+     *  0: "normal" region, contains elements
+     *  1: outside interface region, at the edge of 1 other region, contains only lines
+     *  2: inside interface region, between 2 other regions, contains only lines
+     */
     int type;
     
+    /*
+     * contains all vertices in this regions. Needed for quantity fields
+     */
     std::set<int> vertices;
-    std::vector<tdr_element> elements;
+    
+    /*
+     * contains the ids of all elements in this region. Needed for quantity fields.
+     */
     std::vector<int> element_indices;
+    
+    /*
+     * contains all vertices that were newly created when extruding elements. Needed for quantity fields.
+     */
     std::vector<int> extruded_vertices;
     
   public:
+    /*
+     * Reads the region including all contained elements from the tdr file.
+     * 
+     * The main reason this is not done in the constructor is because then the
+     * region pointer in tdr_element would be invalidated when the region object
+     * is moved/copied into the vector where it is stored.
+     */
     void read(int regnr, const Group &reg)
     {
       id = regnr;
       name = read_string(reg,"name");
       type = read_int(reg,"type");
-      
-      /*
-       * It seems that:
-       *  0 -> "normal" region
-       *  1 -> contact
-       *  2 -> interface between 2 regions
-       */
+
       if(type > 2)
         mythrow("Unknown region type " << type << " found in " << reg.getObjName());
       
+      //iterate over all elements_* and read the contained elements
       const int n=reg.getNumObjs();
       for (int i=0; i<n; i++)
       {
@@ -124,6 +169,10 @@ namespace viennamesh
       }
     }
     
+    /*
+     * Creates the viennagrid region and ads it to the mesh.
+     * Then adds all child elements to the mesh.
+     */
     template <typename MeshT>
     void add_to_mesh(tdr_geometry<MeshT> * geometry)
     {
@@ -146,19 +195,12 @@ namespace viennamesh
       }
     }
     
-    void apply_vertex_quantity(viennagrid::quantity_field & quantity, const std::vector<double> & values)
-    {
-      if(values.size() != vertices.size())
-        mythrow("Quantity field " << quantity.get_name() << " in region " << id << " has invalid size");
-      
-      int i = 0;
-      std::set<int>::iterator vertex = vertices.begin();
-      for(; vertex != vertices.end(); ++vertex)
-      {
-        quantity.set(*vertex, values[i++]);
-      }
-    }
-    
+    /*
+     * Redirects to the private overload of this method with the correct target paramter.
+     * 
+     * location_type 0 = vertices
+     * location_type 3 = elements
+     */
     void apply_quantity(viennagrid::quantity_field & quantity, const std::vector<double> & values, int location_type)
     {
       switch(location_type) {
@@ -173,6 +215,11 @@ namespace viennamesh
       }
     }
     
+    /*
+     * When using "extrude_contacts" new elements and vertices are created for which
+     * no values exist in the tdr file. This method takes the average of the neighbor
+     * verties or element to fill in the missing values.
+     */
     template <typename MeshT>
     void extrude_quantities(tdr_geometry<MeshT> * geometry)
     {
@@ -182,9 +229,11 @@ namespace viennamesh
       typedef typename viennagrid::result_of::cell_range<RegionType>::type CellRangeType;
       typedef typename viennagrid::result_of::iterator<CellRangeType>::type CellIteratorType;
       
+      //only regions of type 1 contain extruded elements
       //TODO: Handle type 2 regions?
       if(type == 1)
       {
+	// iterate over all quantity fields
         std::map<string, viennagrid::quantity_field>::iterator qit = geometry->quantities.begin();
         for(; qit != geometry->quantities.end(); ++qit)
         {
@@ -193,23 +242,27 @@ namespace viennamesh
           
           if(dimension == 0)
           {
+	    //vertex quantity -> iterate over the extruded vertices
             std::vector<int>::const_iterator it = extruded_vertices.begin();
             for(; it != extruded_vertices.end(); ++it)
             {
+	      //set neighbor average as quantity value
               VertexType v = geometry->vertices[*it];
               NeighborRangeType neighbor_vertices(geometry->mesh, v, 1, 0);
-              
               quantity.set(v, get_neighbor_average(quantity, neighbor_vertices));
             }
           }
           else if(dimension == geometry->dim)
           {
+	    //element quantity -> iterate over the extruded elements
+	    //Note: type 1 regions contain only extruded elements
             RegionType reg = geometry->mesh.get_or_create_region(id);
             CellRangeType cells(reg);
             
             CellIteratorType cell = cells.begin();
             for(; cell != cells.end(); ++cell)
             {
+	      //set neighbor average as quantity value
               NeighborRangeType neighbor_cells(geometry->mesh, *cell, dimension-1, dimension);
               quantity.set(*cell, get_neighbor_average(quantity, neighbor_cells));
             }
@@ -225,6 +278,9 @@ namespace viennamesh
     int get_type() {return type;}
     
   private:
+    /*
+     * Read all elements contained in the given dataset
+     */
     void read_elements(const DataSet &elem)
     {
       hsize_t size = get_dataset_size(elem);
@@ -239,6 +295,9 @@ namespace viennamesh
         elements.push_back(tdr_element(this, el, el_end));
     }
     
+    /*
+     * For every given vertex/element given in "target" it sets the given value in the quantity_field.
+     */
     template <typename ContainerT>
     void apply_quantity(viennagrid::quantity_field & quantity, const std::vector<double> & values, const ContainerT & target)
     {
@@ -269,6 +328,9 @@ namespace viennamesh
     }
   };
   
+  /*
+   * This class is the main class of the tdr reader.
+   */
   //TODO: turn to class + access specifiers
   template<typename MeshT>
   struct tdr_geometry
@@ -282,19 +344,11 @@ namespace viennamesh
     
     MeshT const & mesh;
     std::vector<VertexType> vertices;
-    //std::vector<tdr_element> elements;
     std::vector<tdr_region> regions;
     std::map<string, viennagrid::quantity_field> quantities;
     
     unsigned int nvertices;
     int dim,nregions,ndatasets;
-    
-    
-    //MeshT extrude_mesh;
-    
-    int newly_created_vertices_index;
-    std::map< int, std::vector<int> > newly_created_vertices;
-    std::vector<RegionType> contact_regions;
     
     bool extrude_contacts;
     double extrude_contacts_scale;
@@ -302,15 +356,23 @@ namespace viennamesh
     
     tdr_geometry(MeshT const & mesh) : mesh(mesh) {}
 
+    /*
+     * Reads the transformation Matrix+Vector from the tdr file.
+     * 
+     * At the moment it only throws an error if the read transformation
+     * is not equal to the identity transformation.
+     */
     void read_transformation(const Group &trans)
     {
       boost::array<double, 9> trans_matrix, identity_matrix;
       boost::array<double, 3> trans_vector, zero_vector;
       
+      // initialize identity tranformation
       zero_vector.fill(0);
       identity_matrix.fill(0);
       identity_matrix[0] = identity_matrix[4] = identity_matrix[8] = 1;
       
+      // read transformation from file
       const DataSet &A=trans.openDataSet("A");
       const DataSet &b=trans.openDataSet("b");
       A.read( trans_matrix.elems, PredType::NATIVE_DOUBLE);
@@ -359,8 +421,6 @@ namespace viennamesh
 
         vertices.push_back(viennagrid::make_vertex(mesh, point));
       }
-      
-      newly_created_vertices_index = vertices.size();
     }
     
     void read_regions(const Group & group)
@@ -406,8 +466,10 @@ namespace viennamesh
       
       viennagrid::quantity_field & quantity = quantities[name];
       
+      //check if quantity field is already initialized
       if(quantity.get_name() != name)
       {
+	//and initialize it if not
         if(location_type == 0)
           quantity.init(0, 1);
         else
@@ -421,20 +483,19 @@ namespace viennamesh
         mythrow("Units not the same in all regions in quantity field " << name << " - " << dataset.getObjName());
       
       std::vector<double> values = read_vector(dataset.openDataSet("values"));
-      
       region.apply_quantity(quantity, values, location_type);
     }
 
     void read_datasets(const Group &state)
     {
       if (read_int(state,"number of plots") != 0)
-        mythrow("Numberofplots not equal 0");
+        mythrow("'Number of plots' not equal 0");
 
       if (read_int(state,"number of string streams") != 0)
-        mythrow("Numberofstringstreams not equal 0");
+        mythrow("'Number of string streams' not equal 0");
 
       if (read_int(state,"number of xy plots") != 0)
-        mythrow("Numberofxyplots not equal 0");
+        mythrow("'Number of xy plots' not equal 0");
 
       ndatasets=read_int(state,"number of datasets");
       
@@ -453,6 +514,10 @@ namespace viennamesh
       dim = read_int(geometry,"dimension");
       nvertices = read_int(geometry,"number of vertices");
       
+      /*
+       * type 0 = boundary files, contains only polygons and lines and no datasets
+       * type 1 = mesh files
+       */
       if(type != 0 && type != 1)
         mythrow("Unknown geometry type " << type << " in " << geometry.getObjName());
 
@@ -461,6 +526,7 @@ namespace viennamesh
       
       if(type == 0 && extrude_contacts)
       {
+	//extrude contacts does not work with polygons, because is_inside is not implemented for polygons in viennagrid
         warning(0) << "extrude_contacts not available with geometry type 0" << std::endl;
         extrude_contacts = false;
       }
@@ -474,6 +540,7 @@ namespace viennamesh
         it->add_to_mesh(this);
       }
       
+      //only type 1 geometries contain datasets
       if(type == 1)
       {
         read_datasets(geometry.openGroup("state_0"));
@@ -721,8 +788,8 @@ namespace viennamesh
     if(geometry->extrude_contacts && region->type != 0)
       extrude(geometry);
     
+    // wo only have the vertex indices, retrieve the actual vertex objects
     std::vector<VertexType> cell_vertices;
-    
     for(std::vector<int>::iterator it = vertices.begin();
                                   it != vertices.end(); ++it)
     {
@@ -782,6 +849,7 @@ namespace viennamesh
 
     PointType new_vertex = center + normal;
 
+    //check if the new vertex is inside any cell of the mesh
     CellRangeType cells(geometry->mesh);
     CellIteratorType cit = cells.begin();
     for (; cit != cells.end(); ++cit)
@@ -790,9 +858,11 @@ namespace viennamesh
         break;
     }
 
+    //if the vertex is inside the mesh, extrude in the other direction
     if (cit != cells.end())
       new_vertex = center - normal;
 
+    //create the new vertex and add it to the element
     vertices.push_back(geometry->vertices.size());
     region->extruded_vertices.push_back(geometry->vertices.size());
     geometry->vertices.push_back(viennagrid::make_vertex(geometry->mesh, new_vertex));
