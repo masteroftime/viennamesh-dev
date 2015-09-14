@@ -25,13 +25,12 @@
 #include <boost/shared_ptr.hpp>
 #include <boost/scoped_array.hpp>
 #include <boost/array.hpp>
+#include <boost/lexical_cast.hpp>
 
 #include "viennagridpp/mesh/element_creation.hpp"
 #include "viennagridpp/quantity_field.hpp"
-#include "viennagridpp/algorithm/geometry.hpp"
 #include "viennagridpp/algorithm/inclusion.hpp"
 #include "viennagridpp/algorithm/distance.hpp"
-#include "viennagridpp/algorithm/centroid.hpp"
 #include "viennagridpp/point_accessor.hpp"
 
 #include "viennameshpp/logger.hpp"
@@ -331,7 +330,6 @@ namespace viennamesh
   /*
    * This class is the main class of the tdr reader.
    */
-  //TODO: turn to class + access specifiers
   template<typename MeshT>
   struct tdr_geometry
   {
@@ -382,13 +380,6 @@ namespace viennamesh
         mythrow("transformation not equal to identity");
     }
 
-    typedef struct coord2_t {
-      double x;
-      double y;
-      double z;
-    } coord2_t;
-
-
     void read_vertices(const DataSet &vert)
     {
       hsize_t size = get_dataset_size(vert);
@@ -396,28 +387,28 @@ namespace viennamesh
       if (nvertices != size)
         mythrow("nvertices not equal vertices.dim");
 
-      CompType mtype2( sizeof(coord2_t) );
+      CompType mtype2( sizeof(double)*dim );
       
-      mtype2.insertMember( "x", HOFFSET(coord2_t, x), PredType::NATIVE_DOUBLE);
+      mtype2.insertMember( "x", 0, PredType::NATIVE_DOUBLE);
 
       if (dim>1)
-        mtype2.insertMember( "y", HOFFSET(coord2_t, y), PredType::NATIVE_DOUBLE);
+        mtype2.insertMember( "y", sizeof(double), PredType::NATIVE_DOUBLE);
 
       if (dim>2)
-        mtype2.insertMember( "z", HOFFSET(coord2_t, z), PredType::NATIVE_DOUBLE);
+        mtype2.insertMember( "z", sizeof(double)*2, PredType::NATIVE_DOUBLE);
 
-      boost::scoped_array<coord2_t> s2(new coord2_t[size]);
+      boost::scoped_array<double> s2(new double[size*dim]);
       vert.read( s2.get(), mtype2 );
       
-      for (unsigned int i=0; i<size; i++)
+      for (unsigned int i=0; i < size*dim; i += dim)
       {
         PointType point(dim);
         
-        point[0] = s2[i].x;
+        point[0] = s2[i];
         if (dim>1)
-        point[1] = s2[i].y;
+        point[1] = s2[i+1];
         if (dim>2)
-        point[2] = s2[i].z;
+        point[2] = s2[i+2];
 
         vertices.push_back(viennagrid::make_vertex(mesh, point));
       }
@@ -430,9 +421,7 @@ namespace viennamesh
       
       for (int i=0; i<nregions; i++)
       {
-        std::ostringstream ss;
-        ss << "region_" << i;
-        const Group &reg=group.openGroup(ss.str());
+        const Group &reg=group.openGroup("region_" + boost::lexical_cast<string>(i));
         regions.push_back(tdr_region());
         regions.back().read(i, reg);
       }
@@ -444,13 +433,10 @@ namespace viennamesh
       int regnr = read_int(dataset,"region");
       int location_type = read_int(dataset,"location type");
       string unit=read_string(dataset,"unit:name");
+      double conversion_factor = read_double(dataset, "conversion factor");
       
       if (location_type != 0 && location_type != 3)
         mythrow("Location type " << location_type << " in dataset " << name << " not supported");
-      
-      //TODO: Conversion factor???
-      //if (read_double(dataset,"conversion factor") != 1.0)
-      // mythrow("Dataset " << name << " conversion factor not 1.0");
 
       if (read_int(dataset,"structure type") != 0)
         mythrow("Dataset " << name << " structure type not 0");
@@ -473,7 +459,7 @@ namespace viennamesh
         if(location_type == 0)
           quantity.init(0, 1);
         else
-          quantity.init(2, 1);  //TODO: Is this correct or does it have to be dim ?
+          quantity.init(dim, 1);
         
         quantity.set_name(name);
         quantity.set_unit(unit);
@@ -483,6 +469,17 @@ namespace viennamesh
         mythrow("Units not the same in all regions in quantity field " << name << " - " << dataset.getObjName());
       
       std::vector<double> values = read_vector(dataset.openDataSet("values"));
+      
+      if(conversion_factor != 1.0)
+      {
+	warning(0) << "Values multiplied with conversion factor " << conversion_factor << " in " << dataset.getObjName() << std::endl;
+	
+	for(unsigned int i = 0; i < values.size(); ++i)
+	{
+	  values[i] *= conversion_factor;
+	}
+      }
+      
       region.apply_quantity(quantity, values, location_type);
     }
 
@@ -501,9 +498,7 @@ namespace viennamesh
       
       for (int i=0; i<ndatasets; i++)
       {
-        char a[100];
-        sprintf(a,"dataset_%d",i);
-        read_dataset(state.openGroup(a));
+        read_dataset(state.openGroup("dataset_" + boost::lexical_cast<string>(i)));
       }
     }
 
