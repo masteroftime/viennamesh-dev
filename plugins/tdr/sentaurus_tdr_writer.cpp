@@ -54,7 +54,9 @@ H5::DataSet write_dataset(H5::Group & group, std::string const & name, H5::DataT
 
 } //end of anonymous namespace
 
-
+/*
+ * creates the "collection" and "geometry_0" with their most impartant parameters
+ */
 void sentaurus_tdr_writer::create_geometry()
 {
   H5::Group collection = file.createGroup("collection");
@@ -71,6 +73,10 @@ void sentaurus_tdr_writer::create_geometry()
   write_attribute(geometry, "number of states", 1);
 }
 
+/*
+ * At the moment transformations are not supported by the TDR writer so
+ * this methods writes the identity transformation to the TDR file
+ */
 void sentaurus_tdr_writer::write_identity_transformation()
 {
   //transformation Group
@@ -86,11 +92,17 @@ void sentaurus_tdr_writer::write_identity_transformation()
   write_dataset(transformation, "b", H5::PredType::NATIVE_DOUBLE, 3, zero_vector);
 }
 
+/*
+ * Writes the coordinates of all vertices to the "vertex" dataset.
+ * 
+ * Also creates vertex_mapping which links a vertex id from the mesh
+ * to the vertex id in the TDR file.
+ */
 void sentaurus_tdr_writer::write_vertices()
 {
   vertex_mapping.reserve(viennagrid::vertices(mesh).size());
 
-  //vertex Dataset
+  //store the vertex coordinates in a single vector (e.g.: x,y,z,x,y,z,x,...)
   std::vector<double> vertex_coordinates;
   vertex_coordinates.reserve(dimension*viennagrid::vertices(mesh).size());
   MeshVertexRange mesh_vertices(mesh);
@@ -106,6 +118,7 @@ void sentaurus_tdr_writer::write_vertices()
     }
   }
 
+  //create the H5 Datatype based on the dimension of the mesh
   H5::CompType vertex_type( dimension*sizeof(double) );
   vertex_type.insertMember( "x", 0, H5::PredType::NATIVE_DOUBLE);
   if (dimension > 1)
@@ -120,10 +133,13 @@ void sentaurus_tdr_writer::write_vertices()
   write_dataset(geometry, "vertex", vertex_type, vertex_coordinates.size()/dimension, vertex_coordinates);
 }
 
+/*
+ * creates the region groups ("region_x") and writes the elements of each regions to the TDR file
+ */
 void sentaurus_tdr_writer::write_regions()
 {
+  //iterate over all regions
   RegionRange regions(mesh);
-  //region Groups
   int region_counter = 0;
   for (RegionIterator region_it = regions.begin(); region_it != regions.end(); ++region_it, ++region_counter)
   {
@@ -136,6 +152,7 @@ void sentaurus_tdr_writer::write_regions()
 
     std::vector<int32_t> region_element_data;
 
+    //iterate over all cells in the region
     CellRange cells(*region_it);
     unsigned int num_elements = 0;
     for (CellIterator cell_it = cells.begin(); cell_it != cells.end(); ++cell_it, ++num_elements)
@@ -145,9 +162,11 @@ void sentaurus_tdr_writer::write_regions()
 	throw viennautils::make_exception<tdr_writer_error>("Only triangles are supported at the moment");
       }
 
+      //first entry of the element is the type id
       int32_t const triangle_id = 2;
       region_element_data.push_back(triangle_id);
 
+      //then the ids of all vertices that make up this element
       BoundaryVertexRange vertices(*cell_it);
       for (BoundaryVertexIterator vertex_it = vertices.begin(); vertex_it != vertices.end(); ++vertex_it)
       {
@@ -160,6 +179,9 @@ void sentaurus_tdr_writer::write_regions()
   }
 }
 
+/*
+ * Creates the "state_0" group and writes all quantity fields ("dataset_x").
+ */
 void sentaurus_tdr_writer::write_quantity_fields()
 {
   //datasets
@@ -171,6 +193,7 @@ void sentaurus_tdr_writer::write_quantity_fields()
   
   RegionRange regions(mesh);
   
+  //create a map which stores all vertex ids for each region
   typedef boost::container::flat_map<RegionId, std::vector<ElementId> > RegionVertexIdMap;
   RegionVertexIdMap region_vert_ids;
   region_vert_ids.reserve(mesh.region_count());
@@ -184,10 +207,13 @@ void sentaurus_tdr_writer::write_quantity_fields()
     }
   }
 
+  //iterate over all quantity fields
   int num_datasets = 0;
   for (unsigned int i = 0; i < quantities.size(); ++i)
   {
     viennagrid::quantity_field const & quantity = quantities[i];
+    
+    //iterate over all regions
     int region_num = 0;
     for (RegionVertexIdMap::const_iterator region_it = region_vert_ids.begin(); region_it != region_vert_ids.end(); ++region_it, ++region_num)
     {
@@ -243,161 +269,6 @@ void sentaurus_tdr_writer::write_to_tdr()
   {
     throw viennautils::make_exception<tdr_writer_error>("caught HDF5 exception in HDF5 function: " + e.getFuncName() + " - with message: " + e.getDetailMsg());
   }
-}
-
-
-void write_to_tdr()
-{
-  /*unsigned int dimension = viennagrid::geometric_dimension(mesh);
-  if (dimension != 2)
-  {
-    throw viennautils::make_exception<tdr_writer_error>("TDR writer currently supports only two dimensional meshes");
-  }
-
-  try
-  {
-
-    H5::Group geometry = create_geometry(file, mesh);
-    
-    write_identity_transformation(geometry);
-
-    boost::container::flat_map<ElementId, int32_t> vertex_mapping; //should (and has to) be monotonous 'on both sides'
-    vertex_mapping.reserve(viennagrid::vertices(mesh).size());
-
-    {
-      //vertex Dataset
-      std::vector<double> vertex_coordinates;
-      vertex_coordinates.reserve(dimension*viennagrid::vertices(mesh).size());
-      MeshVertexRange mesh_vertices(mesh);
-      int id_counter = 0;
-      for (MeshVertexIterator it = mesh_vertices.begin(); it != mesh_vertices.end(); ++it, ++id_counter)
-      {
-        vertex_mapping[(*it).id()] = id_counter;
-
-        PointType const & p = viennagrid::get_point(*it);
-        for (PointType::size_type i = 0; i < dimension; ++i)
-        {
-          vertex_coordinates.push_back(p[i]);
-        }
-      }
-
-      H5::CompType vertex_type( dimension*sizeof(double) );
-      vertex_type.insertMember( "x", 0, H5::PredType::NATIVE_DOUBLE);
-      if (dimension > 1)
-      {
-        vertex_type.insertMember( "y", sizeof(double), H5::PredType::NATIVE_DOUBLE);
-      }
-      if (dimension > 2)
-      {
-        vertex_type.insertMember( "z", 2*sizeof(double), H5::PredType::NATIVE_DOUBLE);
-      }
-
-      write_dataset(geometry, "vertex", vertex_type, vertex_coordinates.size()/dimension, vertex_coordinates);
-    }
-
-    RegionRange regions(mesh);
-    {
-      //region Groups
-      int region_counter = 0;
-      for (RegionIterator region_it = regions.begin(); region_it != regions.end(); ++region_it, ++region_counter)
-      {
-        //write name etc.
-        H5::Group region_group = geometry.createGroup("region_" + boost::lexical_cast<std::string>(region_counter));
-        write_attribute(region_group, "type", 0);
-        write_attribute(region_group, "name", (*region_it).get_name());
-        write_attribute(region_group, "material", "unknown"); //TODO
-        write_attribute(region_group, "number of parts", 1);
-
-        std::vector<int32_t> region_element_data;
-
-        CellRange cells(*region_it);
-        unsigned int num_elements = 0;
-        for (CellIterator cell_it = cells.begin(); cell_it != cells.end(); ++cell_it, ++num_elements)
-        {
-          if (!(*cell_it).tag().is_triangle())
-          {
-            throw viennautils::make_exception<tdr_writer_error>("Only triangles are supported at the moment");
-          }
-
-          int32_t const triangle_id = 2;
-          region_element_data.push_back(triangle_id);
-
-          BoundaryVertexRange vertices(*cell_it);
-          for (BoundaryVertexIterator vertex_it = vertices.begin(); vertex_it != vertices.end(); ++vertex_it)
-          {
-            region_element_data.push_back(vertex_mapping[(*vertex_it).id()]);
-          }
-        }
-
-        H5::DataSet elements = write_dataset(region_group, "elements_0", H5::PredType::NATIVE_INT32, region_element_data.size(), region_element_data);
-        write_attribute(elements, "number of elements", static_cast<int>(num_elements));
-      }
-    }
-
-    if (!quantities.empty())
-    {
-      //datasets
-      H5::Group state = geometry.createGroup("state_0");
-      write_attribute(state, "name", "state_0");
-      write_attribute(state, "number of plots", 0);
-      write_attribute(state, "number of string streams", 0);
-      write_attribute(state, "number of xy plots", 0);
-
-      typedef boost::container::flat_map<RegionId, std::vector<ElementId> > RegionVertexIdMap;
-      RegionVertexIdMap region_vert_ids;
-      region_vert_ids.reserve(mesh.region_count());
-      for (RegionIterator region_it = regions.begin(); region_it != regions.end(); ++region_it)
-      {
-        std::vector<ElementId> & vertex_ids = region_vert_ids[(*region_it).id()];
-        RegionVertexRange vertices(*region_it);
-        for (RegionVertexIterator vertex_it = vertices.begin(); vertex_it != vertices.end(); ++vertex_it)
-        {
-          vertex_ids.push_back((*vertex_it).id());
-        }
-      }
-
-      int num_datasets = 0;
-      for (unsigned int i = 0; i < quantities.size(); ++i)
-      {
-        viennagrid::quantity_field const & quantity = quantities[i];
-        int region_num = 0;
-        for (RegionVertexIdMap::const_iterator region_it = region_vert_ids.begin(); region_it != region_vert_ids.end(); ++region_it, ++region_num)
-        {
-          std::vector<ElementId> const & vertex_ids = region_it->second;
-          std::vector<double> values;
-          values.reserve(vertex_ids.size());
-          for (unsigned int j = 0; j < vertex_ids.size(); ++j)
-          {
-            if (!quantity.valid(vertex_ids[j]))
-            {
-              break;
-            }
-            values.push_back(quantity.get(vertex_ids[j]));
-          }
-
-          if (values.size() == vertex_ids.size()) //only write quantities that are defined on the entire region
-          {
-            H5::Group dataset_group = state.createGroup("dataset_" + boost::lexical_cast<std::string>(num_datasets++));
-            write_attribute(dataset_group, "number of values", static_cast<int>(values.size()));
-            write_attribute(dataset_group, "location type", 0);
-            write_attribute(dataset_group, "structure type", 0);
-            write_attribute(dataset_group, "value type", 2);
-            write_attribute(dataset_group, "name", quantity.get_name());
-            write_attribute(dataset_group, "quantity", quantity.get_name());
-            write_attribute(dataset_group, "conversion factor", 1.0);
-            write_attribute(dataset_group, "region", region_num);
-            write_attribute(dataset_group, "unit:name", "unknown"); //TODO
-            write_dataset(dataset_group, "values", H5::PredType::NATIVE_DOUBLE, values.size(), values);
-          }
-        }
-      }
-      write_attribute(state, "number of datasets", num_datasets);
-    }
-  }
-  catch(H5::Exception const & e)
-  {
-    throw viennautils::make_exception<tdr_writer_error>("caught HDF5 exception in HDF5 function: " + e.getFuncName() + " - with message: " + e.getDetailMsg());
-  }*/
 }
 
 } //end of namespace viennagrid

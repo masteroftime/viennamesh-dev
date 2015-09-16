@@ -77,8 +77,6 @@ public:
   void write_to_tdr();
 };
 
-void write_to_tdr(std::string const & filename, viennagrid::const_mesh const & mesh, std::vector<viennagrid::quantity_field> const & quantities);
-
 } //end of namespace viennamesh
 
 #endif
