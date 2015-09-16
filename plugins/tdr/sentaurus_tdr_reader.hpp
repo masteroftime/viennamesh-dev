@@ -274,6 +274,55 @@ namespace viennamesh
       }
     }
     
+    /*
+     * If the fill_triangle_contacts parameter is set, this method will connect extruded vertices
+     * using triangles.
+     */
+    template <typename MeshT>
+    void fill_triangle_contacts(tdr_geometry<MeshT> * geometry)
+    {
+      typedef typename tdr_geometry<MeshT>::VertexType VertexType;
+      typedef typename tdr_geometry<MeshT>::RegionType RegionType;
+      typedef typename viennagrid::result_of::neighbor_range<MeshT>::type NeighborRangeType;
+      typedef typename viennagrid::result_of::iterator<NeighborRangeType>::type NeighborIteratorType;
+      
+      //TODO: Handle type 2 regions?
+      if(type != 1)
+        return;
+      
+      RegionType reg = geometry->mesh.get_or_create_region(id);
+      std::vector<VertexType> triangles;
+      
+      //iterate over all pairs of extruded vertices
+      for(std::vector<int>::iterator it1 = extruded_vertices.begin(); it1 != extruded_vertices.end(); ++it1)
+        for(std::vector<int>::iterator it2 = it1 + 1; it2 != extruded_vertices.end(); ++it2)
+        {
+          VertexType v1 = geometry->vertices[*it1];
+          VertexType v2 = geometry->vertices[*it2];
+          
+          //get the neighbor vertices
+          NeighborRangeType n1 (geometry->mesh, v1, 1, 0);
+          NeighborRangeType n2 (geometry->mesh, v2, 1, 0);
+          
+          for(NeighborIteratorType nit1 = n1.begin(); nit1 != n1.end(); ++nit1)
+            for(NeighborIteratorType nit2 = n2.begin(); nit2 != n2.end(); ++nit2)
+            {
+              if(*nit1 == *nit2)
+              {
+                //viennagrid::make_triangle(reg, v1, v2, *nit1);
+                triangles.push_back(v1);
+                triangles.push_back(v2);
+                triangles.push_back(*nit1);
+              }
+            }
+        }
+      
+      for(typename std::vector<VertexType>::iterator t = triangles.begin(); t != triangles.end(); t += 3)
+      {
+        viennagrid::make_element(reg, viennagrid::element_tag::triangle(), t, t+3);
+      }
+    }
+    
     int get_type() {return type;}
     
   private:
@@ -316,14 +365,19 @@ namespace viennamesh
     {
       typedef typename viennagrid::result_of::iterator<NeighborRangeType>::type NeighborIteratorType;
       double value = 0;
-      int i = 0;
+      int count = 0;
       
       NeighborIteratorType neighbor = neighbors.begin();
-      for(; neighbor != neighbors.end(); ++neighbor, ++i)
+      for(; neighbor != neighbors.end(); ++neighbor)
       {
-        value += quantity.get(*neighbor);
+        //only consider neighbors with a valid value
+        if(quantity.valid(*neighbor))
+        {
+          value += quantity.get(*neighbor);
+          ++count;
+        }
       }
-      return value / (double)i;
+      return value / (double)count;
     }
   };
   
@@ -533,6 +587,9 @@ namespace viennamesh
       for(region_iterator it = regions.begin(); it != regions.end(); ++it)
       {
         it->add_to_mesh(this);
+        
+        if(fill_triangle_contacts)
+          it->fill_triangle_contacts(this);
       }
       
       //only type 1 geometries contain datasets
