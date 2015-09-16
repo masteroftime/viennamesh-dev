@@ -18,6 +18,7 @@
 
 #include <boost/lexical_cast.hpp>
 
+#include "viennameshpp/logger.hpp"
 
 namespace viennamesh
 {
@@ -157,16 +158,41 @@ void sentaurus_tdr_writer::write_regions()
     unsigned int num_elements = 0;
     for (CellIterator cell_it = cells.begin(); cell_it != cells.end(); ++cell_it, ++num_elements)
     {
-      if (!(*cell_it).tag().is_triangle())
+      // the first entry for each element is the element type id
+      if((*cell_it).tag().is_line())
       {
-	throw viennautils::make_exception<tdr_writer_error>("Only triangles are supported at the moment");
+        region_element_data.push_back(1);
+      }
+      else if((*cell_it).tag().is_triangle())
+      {
+        region_element_data.push_back(2);
+      }
+      else if((*cell_it).tag().is_quadrilateral())
+      {
+        region_element_data.push_back(3);
+      }
+      else if((*cell_it).tag().is_polygon())
+      {
+        region_element_data.push_back(4);
+        
+        // for polygons, the number of vertices follows after the type id
+        uint32_t vertex_count = 0;
+        BoundaryVertexRange vertices(*cell_it);
+        for(BoundaryVertexIterator it = vertices.begin(); it != vertices.end(); ++it)
+          ++vertex_count;
+        
+        region_element_data.push_back(vertex_count);
+      }
+      else if((*cell_it).tag().is_tetrahedron())
+      {
+        region_element_data.push_back(5);
+      }
+      else
+      {
+        throw viennautils::make_exception<tdr_writer_error>("Unsupported element type " + (*cell_it).tag().name());
       }
 
-      //first entry of the element is the type id
-      int32_t const triangle_id = 2;
-      region_element_data.push_back(triangle_id);
-
-      //then the ids of all vertices that make up this element
+      //then write the ids of all vertices that make up this element
       BoundaryVertexRange vertices(*cell_it);
       for (BoundaryVertexIterator vertex_it = vertices.begin(); vertex_it != vertices.end(); ++vertex_it)
       {
@@ -192,20 +218,6 @@ void sentaurus_tdr_writer::write_quantity_fields()
   write_attribute(state, "number of xy plots", 0);
   
   RegionRange regions(mesh);
-  
-  //create a map which stores all vertex ids for each region
-  typedef boost::container::flat_map<RegionId, std::vector<ElementId> > RegionVertexIdMap;
-  RegionVertexIdMap region_vert_ids;
-  region_vert_ids.reserve(mesh.region_count());
-  for (RegionIterator region_it = regions.begin(); region_it != regions.end(); ++region_it)
-  {
-    std::vector<ElementId> & vertex_ids = region_vert_ids[(*region_it).id()];
-    RegionVertexRange vertices(*region_it);
-    for (RegionVertexIterator vertex_it = vertices.begin(); vertex_it != vertices.end(); ++vertex_it)
-    {
-      vertex_ids.push_back((*vertex_it).id());
-    }
-  }
 
   //iterate over all quantity fields
   int num_datasets = 0;
@@ -215,35 +227,79 @@ void sentaurus_tdr_writer::write_quantity_fields()
     
     //iterate over all regions
     int region_num = 0;
-    for (RegionVertexIdMap::const_iterator region_it = region_vert_ids.begin(); region_it != region_vert_ids.end(); ++region_it, ++region_num)
+    for(RegionIterator region_it = regions.begin(); region_it != regions.end(); ++region_it, ++region_num)
     {
-      std::vector<ElementId> const & vertex_ids = region_it->second;
+      //store all values which have to be written in a vector
       std::vector<double> values;
-      values.reserve(vertex_ids.size());
-      for (unsigned int j = 0; j < vertex_ids.size(); ++j)
+      bool valid = true;
+      int location_type;
+      
+      if(quantity.topologic_dimension() == 0)
       {
-	if (!quantity.valid(vertex_ids[j]))
-	{
-	  break;
-	}
-	values.push_back(quantity.get(vertex_ids[j]));
+        location_type = 0;
+        
+        RegionVertexRange vertices(*region_it);
+        for(RegionVertexIterator vertex_it = vertices.begin(); vertex_it != vertices.end(); ++vertex_it)
+        {
+          if (!quantity.valid(*vertex_it))
+          {
+            valid = false;
+            break;
+          }
+          
+          values.push_back(quantity.get(*vertex_it));
+        }
+        
+        if(!valid)
+        {
+          warning(1) << "Skipping quantity field " << quantity.get_name() << " in region " << region_num
+            << " which is not defined for all vertices in that region" << std::endl;
+        }
+      }
+      else if(quantity.topologic_dimension() == viennagrid::cell_dimension(mesh))
+      {
+        location_type = 3;
+        
+        CellRange cells(*region_it);
+        for(CellIterator cell_it = cells.begin(); cell_it != cells.end(); ++cell_it)
+        {
+          if (!quantity.valid(*cell_it))
+          {
+            valid = false;
+            break;
+          }
+          
+          values.push_back(quantity.get(*cell_it));
+        }
+        
+        if(!valid)
+        {
+          warning(1) << "Skipping quantity field " << quantity.get_name() << " in region " << region_num
+            << " which is not defined for all cells in that region" << std::endl;
+        }
+      }
+      else
+      {
+        valid = false;
+        
+        warning(1) << "Skipping quantity field " << quantity.get_name() << " in region " << region_num
+            << ". Only quantity fields on vertices and cells are supported!" << std::endl;
       }
 
-      if (values.size() == vertex_ids.size()) //only write quantities that are defined on the entire region
+      if (valid) //only write quantities that are defined on the entire region
       {
 	H5::Group dataset_group = state.createGroup("dataset_" + boost::lexical_cast<std::string>(num_datasets++));
 	write_attribute(dataset_group, "number of values", static_cast<int>(values.size()));
-	write_attribute(dataset_group, "location type", 0);
+	write_attribute(dataset_group, "location type", location_type);
 	write_attribute(dataset_group, "structure type", 0);
 	write_attribute(dataset_group, "value type", 2);
 	write_attribute(dataset_group, "name", quantity.get_name());
 	write_attribute(dataset_group, "quantity", quantity.get_name());
 	write_attribute(dataset_group, "conversion factor", 1.0);
 	write_attribute(dataset_group, "region", region_num);
-	write_attribute(dataset_group, "unit:name", "unknown"); //TODO
+	write_attribute(dataset_group, "unit:name", quantity.unit());
 	write_dataset(dataset_group, "values", H5::PredType::NATIVE_DOUBLE, values.size(), values);
       }
-      //TODO: warn if quantity fields are skipped
     }
   }
   write_attribute(state, "number of datasets", num_datasets);
