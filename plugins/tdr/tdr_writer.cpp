@@ -47,10 +47,9 @@ bool tdr_writer::run(viennamesh::algorithm_handle &)
     if(quantities.valid())
       quantity_vector = quantities.get_vector();
     
-    sentaurus_tdr_writer w(filename(), input_mesh(), quantity_vector);
-    w.write_to_tdr();
+    tdr::write_to_tdr(filename(), input_mesh(), quantity_vector);
   }
-  catch (tdr_writer_error const & e)
+  catch (tdr::writer_error const & e)
   {
     error(1) << "Got error while writing mesh to TDR file: " << e.what() << std::endl;
     return false;

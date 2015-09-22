@@ -41,27 +41,29 @@ namespace viennamesh
 
     
     mesh_handle output_mesh = make_data<mesh_handle>();
-    tdr_geometry<mesh_handle::CPPResultType> geometry(output_mesh());
+    tdr::geometry<mesh_handle::CPPResultType> geometry(output_mesh());
     
     if ( get_input<bool>("extrude_contacts").valid() )
-      geometry.extrude_contacts = get_input<bool>("extrude_contacts")();
-    else
-      geometry.extrude_contacts = true;
+      geometry.set_extrude_contacts(get_input<bool>("extrude_contacts")());
 
     if ( get_input<double>("extrude_contacts_scale").valid() )
-      geometry.extrude_contacts_scale = get_input<double>("extrude_contacts_scale")();
-    else
-      geometry.extrude_contacts_scale = 1.0;
+      geometry.set_extrude_contacts_scale(get_input<double>("extrude_contacts_scale")());
     
     if ( get_input<bool>("fill_triangle_contacts").valid() )
-      geometry.fill_triangle_contacts = get_input<bool>("fill_triangle_contacts")();
-    else
-      geometry.fill_triangle_contacts = false;
+      geometry.set_fill_triangle_contacts(get_input<bool>("fill_triangle_contacts")());
 
-    try {
+    try
+    {
       geometry.read_file(full_filename);
-    } catch (std::runtime_error &e) {
+    }
+    catch (tdr::read_error &e)
+    {
       error(1) << e.what() << std::endl;
+      return false;
+    }
+    catch(H5::Exception const & e)
+    {
+      error(1) << "caught HDF5 exception in HDF5 function: " + e.getFuncName() + " - with message: " + e.getDetailMsg();
       return false;
     }
 

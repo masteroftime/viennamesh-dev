@@ -15,15 +15,64 @@
 #include "sentaurus_tdr_writer.hpp"
 
 #include <fstream>
-
 #include <boost/lexical_cast.hpp>
+#include <boost/container/flat_map.hpp>
 
 #include "viennameshpp/logger.hpp"
+#include "viennagridpp/range.hpp"
 
-namespace viennamesh
+#include "H5Cpp.h"
+
+namespace tdr
 {
 namespace
 {
+
+class sentaurus_tdr_writer {
+  typedef viennagrid::const_mesh                                          MeshType;
+  typedef viennagrid::result_of::element<MeshType>::type                  ElementType;
+  typedef viennagrid::result_of::point<MeshType>::type                    PointType;
+  typedef viennagrid::result_of::region<MeshType>::type                   RegionType;
+  typedef viennagrid::result_of::id<ElementType>::type                    ElementId;
+  typedef viennagrid::result_of::id<RegionType>::type                     RegionId;
+
+  typedef viennagrid::result_of::const_vertex_range<MeshType>::type       MeshVertexRange;
+  typedef viennagrid::result_of::iterator<MeshVertexRange>::type          MeshVertexIterator;
+
+  typedef viennagrid::result_of::const_vertex_range<ElementType>::type    BoundaryVertexRange;
+  typedef viennagrid::result_of::iterator<BoundaryVertexRange>::type      BoundaryVertexIterator;
+
+  typedef viennagrid::result_of::const_region_range<MeshType>::type       RegionRange;
+  typedef viennagrid::result_of::iterator<RegionRange>::type              RegionIterator;
+
+  typedef viennagrid::result_of::const_vertex_range<RegionType>::type     RegionVertexRange;
+  typedef viennagrid::result_of::iterator<RegionVertexRange>::type        RegionVertexIterator;
+
+  typedef viennagrid::result_of::const_cell_range<RegionType>::type       CellRange;
+  typedef viennagrid::result_of::iterator<CellRange>::type                CellIterator;
+  
+  MeshType const & mesh;
+  std::vector<viennagrid::quantity_field> const & quantities;
+  
+  H5::H5File file;
+  H5::Group geometry;
+  unsigned int dimension;
+  boost::container::flat_map<ElementId, int32_t> vertex_mapping;
+  
+  void create_geometry();
+  void write_identity_transformation();
+  void write_vertices();
+  void write_regions();
+  void write_quantity_fields();
+  
+  
+public:
+  sentaurus_tdr_writer(std::string const & filename, MeshType const & mesh, std::vector<viennagrid::quantity_field> const & quantities)
+    : mesh(mesh), quantities(quantities), file(filename, H5F_ACC_TRUNC) {}
+  
+  void write_to_tdr();
+};
+
 
 void write_attribute(H5::H5Object & obj, std::string const & name, std::string const & value)
 {
@@ -52,8 +101,6 @@ H5::DataSet write_dataset(H5::Group & group, std::string const & name, H5::DataT
   dataset.write(&data[0], type);
   return dataset;
 }
-
-} //end of anonymous namespace
 
 /*
  * creates the "collection" and "geometry_0" with their most impartant parameters
@@ -189,7 +236,7 @@ void sentaurus_tdr_writer::write_regions()
       }
       else
       {
-        throw viennautils::make_exception<tdr_writer_error>("Unsupported element type " + (*cell_it).tag().name());
+        throw viennautils::make_exception<writer_error>("Unsupported element type " + (*cell_it).tag().name());
       }
 
       //then write the ids of all vertices that make up this element
@@ -252,7 +299,7 @@ void sentaurus_tdr_writer::write_quantity_fields()
         
         if(!valid)
         {
-          warning(1) << "Skipping quantity field " << quantity.get_name() << " in region " << region_num
+          viennamesh::warning(1) << "Skipping quantity field " << quantity.get_name() << " in region " << region_num
             << " which is not defined for all vertices in that region" << std::endl;
         }
       }
@@ -274,7 +321,7 @@ void sentaurus_tdr_writer::write_quantity_fields()
         
         if(!valid)
         {
-          warning(1) << "Skipping quantity field " << quantity.get_name() << " in region " << region_num
+          viennamesh::warning(1) << "Skipping quantity field " << quantity.get_name() << " in region " << region_num
             << " which is not defined for all cells in that region" << std::endl;
         }
       }
@@ -282,7 +329,7 @@ void sentaurus_tdr_writer::write_quantity_fields()
       {
         valid = false;
         
-        warning(1) << "Skipping quantity field " << quantity.get_name() << " in region " << region_num
+        viennamesh::warning(1) << "Skipping quantity field " << quantity.get_name() << " in region " << region_num
             << ". Only quantity fields on vertices and cells are supported!" << std::endl;
       }
 
@@ -312,7 +359,7 @@ void sentaurus_tdr_writer::write_to_tdr()
     dimension = viennagrid::geometric_dimension(mesh);
     if (dimension != 2)
     {
-      throw viennautils::make_exception<tdr_writer_error>("TDR writer currently supports only two dimensional meshes");
+      throw viennautils::make_exception<writer_error>("TDR writer currently supports only two dimensional meshes");
     }
     
     create_geometry();
@@ -323,8 +370,17 @@ void sentaurus_tdr_writer::write_to_tdr()
   }
   catch(H5::Exception const & e)
   {
-    throw viennautils::make_exception<tdr_writer_error>("caught HDF5 exception in HDF5 function: " + e.getFuncName() + " - with message: " + e.getDetailMsg());
+    throw viennautils::make_exception<writer_error>("caught HDF5 exception in HDF5 function: " + e.getFuncName() + " - with message: " + e.getDetailMsg());
   }
 }
 
-} //end of namespace viennagrid
+} //end of anonymous namespace
+
+void write_to_tdr(const std::string& filename, const viennagrid::const_mesh& mesh, const std::vector< viennagrid::quantity_field >& quantities)
+{
+  sentaurus_tdr_writer w(filename, mesh, quantities);
+  w.write_to_tdr();
+}
+
+
+} //end of namespace tdr
